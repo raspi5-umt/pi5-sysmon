@@ -187,30 +187,50 @@ def draw_bar(draw, x, y, w, h, value_pct, color):
     draw.rounded_rectangle([x, y, x + v, y + h], radius=6, fill=color)
 
 def draw_sparkline(draw, x, y, w, h, data, color):
+    # Arka plan
     draw.rectangle([x, y, x + w, y + h], fill=(0, 0, 0, 0), outline=None)
     if not data:
         return
-    arr = np.array(data, dtype=float)
-    if np.max(arr) == np.min(arr):
-        arr = arr + 0.0001
-    norm = (arr - np.min(arr)) / (np.max(arr) - np.min(arr))
+
+    arr = np.array(list(data), dtype=float)
+
+    # Geçersiz değerleri at (NaN/inf)
+    mask = np.isfinite(arr)
+    if not np.any(mask):
+        return
+    arr = arr[mask]
+
+    # Tek değer ya da sabit dizi: düz çizgi
+    mn, mx = float(np.min(arr)), float(np.max(arr))
+    if mx - mn == 0:
+        norm = np.zeros_like(arr)
+    else:
+        norm = (arr - mn) / (mx - mn)
+
+    # Noktalar
+    n = len(norm)
+    if n < 2:
+        # En az iki nokta yoksa ortadan kısa bir çizgi
+        py = y + h // 2
+        draw.line((x, py, x + w, py), fill=color, width=2)
+        return
+
     pts = []
     for i, v in enumerate(norm):
-        px = x + int(i * (w - 1) / max(1, len(norm) - 1))
+        if not np.isfinite(v):
+            v = 0.0
+        px = x + int(i * (w - 1) / (n - 1))
         py = y + h - 1 - int(v * (h - 1))
         pts.append((px, py))
+
     # grid
     for gy in range(3):
         gy_y = y + int(gy * h / 3)
         draw.line((x, gy_y, x + w, gy_y), fill=GRID, width=1)
-    # polyline
+
+    # çizgi
     for i in range(1, len(pts)):
         draw.line((pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]), fill=color, width=2)
-
-def pick_color_pct(p):
-    if p < 70: return BAR
-    if p < 85: return WARN
-    return DANGER
 
 # --- SAYFALAR ---
 def page_summary(img, draw, m: Metrics, anim_t):
@@ -292,7 +312,11 @@ class App:
         self.running = True
         self.t_metrics = threading.Thread(target=self.metrics_loop, daemon=True)
         self.t_metrics.start()
-
+        # Hist'leri tohumla ki ilk frame'de boş/NaN olmasın
+        for _ in range(3):
+            self.metrics.update()
+            time.sleep(0.1)
+            
     def metrics_loop(self):
         while self.running:
             self.metrics.update()
