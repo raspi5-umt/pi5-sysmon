@@ -276,7 +276,7 @@ class App:
             rotation=ROTATION,
             spi_speed_hz=80_000_000
         )
-        self.st.init()
+        self.st.begin()
 
         self.metrics = Metrics(history_len=90)
         self.touch = Touch()
