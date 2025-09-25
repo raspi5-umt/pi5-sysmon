@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import time, math, os, threading, psutil, subprocess
 from collections import deque
-
 # --- EKRAN SÜRÜCÜSÜ (ST7789) ---
 try:
     import ST7789 as st7789  # pimoroni python-st7789 modülü
