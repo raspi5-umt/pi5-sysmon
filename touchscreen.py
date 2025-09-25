@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-# Ümit, bu dosya "tek atımlık roket": ST7789 + CST816S dokunmatik + canlı grafik.
-# Ekran: 240x280 ST7789 (SPI)
-# Touch: CST816S (I2C addr 0x15). Yoksa kod çalışır, sadece kaydırma olmayacak.
-
 import time, math, os, threading, psutil, subprocess
 from collections import deque
 
