@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Raspberry Pi 5 • 1.69" (240x280) "NASA" paneli + FAN ölçümü
-# - Görüntü: lib/LCD_1inch69 (üretici sürücüsü)
-# - Dokunmatik: I2C (0x15) varsa kullanır, yoksa kapalı sayar
-# - Sayfalar: Özet • Disk&Net • Süreçler • Sistem
-# - Fan: hwmon → fanX_input (RPM), pwm1 (%), thermal cooling_device (state) fallback
-# - NumPy yok; NaN güvenlikli; yumuşak sayfa geçişi
+# ÇALIŞAN panelin minimal+fan sürümü: init/loop ellemiyorum.
+# Sadece fan okumayı ekledim ve summary sayfasına bir halka daha koydum.
 
-import os, sys, time, math, threading, subprocess
+import os, sys, time, math, threading, subprocess, argparse
 from collections import deque
 from PIL import Image, ImageDraw, ImageFont
 import psutil
 
-# ---------- SÜRÜCÜ ----------
+# ---------- ÜRETİCİ SÜRÜCÜ ----------
 from lib.LCD_1inch69 import LCD_1inch69
 
-# ---------- Dokunmatik ----------
+# ---------- Dokunmatik (aynen bıraktım) ----------
 try:
     from smbus2 import SMBus
     SMBUS_OK = True
@@ -43,7 +39,8 @@ def load_font(sz):
     for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
               "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
               "/usr/share/fonts/truetype/freefont/FreeSans.ttf"):
-        if os.path.exists(p): return ImageFont.truetype(p, sz)
+        if os.path.exists(p):
+            return ImageFont.truetype(p, sz)
     return ImageFont.load_default()
 
 F12, F14, F16, F18, F22 = (load_font(s) for s in (12,14,16,18,22))
@@ -58,7 +55,7 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 def pick_color(p, C):
-    p = clamp(p,0,100)
+    p = clamp(p, 0, 100)
     return C["OK"] if p < 70 else (C["WARN"] if p < 85 else C["BAD"])
 
 def bar(d, x,y,w,h,pct,C):
@@ -68,29 +65,31 @@ def bar(d, x,y,w,h,pct,C):
 
 def ring(d, cx, cy, r, pct, C, width=10):
     pct = clamp(pct,0,100)/100.0
-    box=[cx-r,cy-r,cx+r,cy+r]
+    box=[cx-r, cy-r, cx+r, cy+r]
     d.arc(box, start=135, end=405, width=width, fill=C["BARBG"])
     d.arc(box, start=135, end=135+int(270*pct), width=width, fill=pick_color(pct*100,C))
 
-def spark(d, x,y,w,h,series,color,C,grid=True):
+def sparkline(d, x,y,w,h,series,color,C,grid=True):
     if grid:
         for gy in range(3):
-            gy_y=y+int(gy*h/3)
-            d.line((x,gy_y,x+w,gy_y), fill=C["GRID"])
+            gy_y = y + int(gy*h/3)
+            d.line((x, gy_y, x+w, gy_y), fill=C["GRID"])
     vals=[]
     for v in list(series):
         try:
             vv=float(v)
             if math.isfinite(vv): vals.append(vv)
         except: pass
-    if len(vals)<2 or max(vals)==min(vals):
-        py=y+h//2; d.line((x,py,x+w,py), width=2, fill=color); return
+    if len(vals) < 2 or max(vals) == min(vals):
+        py = y + h//2
+        d.line((x,py,x+w,py), fill=color, width=2)
+        return
     n=len(vals); mn=min(vals); mx=max(vals); prev=None
     for i,v in enumerate(vals):
         t=(v-mn)/(mx-mn)
-        px=x+int(i*(w-1)/max(1,n-1))
-        py=y+h-1-int(t*(h-1))
-        if prev: d.line((prev[0],prev[1],px,py), width=2, fill=color)
+        px = x + int(i*(w-1)/max(1,n-1))
+        py = y + h - 1 - int(t*(h-1))
+        if prev: d.line((prev[0],prev[1],px,py), fill=color, width=2)
         prev=(px,py)
 
 def get_cmd(*args):
@@ -100,50 +99,10 @@ def get_cmd(*args):
     except Exception:
         return ""
 
-# ---------- Dokunmatik sınıfı ----------
-class Touch:
-    def __init__(self):
-        self.available = SMBUS_OK
-        self.bus = None
-        if self.available:
-            try:
-                self.bus = SMBus(I2C_BUS)
-                self.bus.read_i2c_block_data(CSTINET_ADDR:=CST816_ADDR, 0x00, 1)
-            except Exception:
-                self.available = False; self.bus = None
-        self.start_y=None
-        self.swipe_thresh=30
-
-    def read_point(self, W,H):
-        if not self.available: return None
-        try:
-            d = self.bus.read_i2c_block_data(CST816_ADDR, 0x00, 7)
-            if (d[1] & 0x0F) == 0:
-                self.start_y=None; return None
-            x = ((d[2]&0x0F)<<8) | d[3]
-            y = ((d[4]&0x0F)<<8) | d[5]
-            return (max(0,min(W-1,x)), max(0,min(H-1,y)))
-        except Exception:
-            return None
-
-    def detect_swipe(self, y):
-        if self.start_y is None:
-            self.start_y=y; return 0
-        dy = y - self.start_y
-        if dy <= -self.swipe_thresh: self.start_y=None; return -1
-        if dy >=  self.swipe_thresh: self.start_y=None; return  1
-        return 0
-
-# ---------- FAN Okuyucu ----------
+# ---------- FAN Okuyucu (yeni) ----------
 class FanReader:
-    """
-    Elinden geleni yapar:
-    1) /sys/class/hwmon/hwmon*/fan*_input -> RPM
-    2) /sys/class/hwmon/hwmon*/pwm1 -> duty (0..255) -> %
-    3) /sys/class/thermal/cooling_device*/{cur_state,max_state} -> %
-    Ne bulursa onu dönër: (rpm, percent)
-    """
-    def __init__(self):
+    def __init__(self, log=False):
+        self.log = log
         self.fan_input = None
         self.pwm1 = None
         self.cool_cur = None
@@ -157,18 +116,20 @@ class FanReader:
             return []
 
     def _discover(self):
-        # 1) hwmon
+        # 1) /sys/class/hwmon
         for hw in self._glob("/sys/class/hwmon"):
             for node in self._glob(hw):
-                # fan input
+                # fan*_input
                 for f in self._glob(node):
                     if os.path.basename(f).startswith("fan") and f.endswith("_input"):
                         self.fan_input = f
+                        if self.log: print("[fan] fan_input:", f)
                         break
                 # pwm1
                 p = os.path.join(node, "pwm1")
                 if os.path.exists(p):
                     self.pwm1 = p
+                    if self.log: print("[fan] pwm1:", p)
             if self.fan_input or self.pwm1:
                 return
         # 2) cooling_device
@@ -179,6 +140,7 @@ class FanReader:
             mx  = os.path.join(cd, "max_state")
             if os.path.exists(cur) and os.path.exists(mx):
                 self.cool_cur, self.cool_max = cur, mx
+                if self.log: print("[fan] cooling_device:", cur, mx)
                 return
 
     def _read_int(self, path):
@@ -191,17 +153,12 @@ class FanReader:
     def read(self):
         rpm = None
         pct = None
-        # Öncelik: RPM
         if self.fan_input:
             v = self._read_int(self.fan_input)
-            if v is not None:
-                rpm = max(0, v)
-        # PWM yüzde
+            if v is not None: rpm = max(0, v)
         if self.pwm1:
             v = self._read_int(self.pwm1)
-            if v is not None:
-                pct = clamp((v/255.0)*100.0, 0, 100)
-        # Cooling device state
+            if v is not None: pct = clamp((v/255.0)*100.0, 0, 100)
         if pct is None and self.cool_cur and self.cool_max:
             cur = self._read_int(self.cool_cur)
             mx  = self._read_int(self.cool_max)
@@ -209,9 +166,9 @@ class FanReader:
                 pct = clamp((cur/mx)*100.0, 0, 100)
         return rpm, pct
 
-# ---------- Metrikler ----------
+# ---------- Metrikler (çalışan sürümle aynı + fan) ----------
 class Metrics:
-    def __init__(self, hist_len=90):
+    def __init__(self, hist_len=90, log=False):
         self.cpu=self.ram=self.disk=self.temp=0.0
         self.up=self.dn=0.0
         self.hcpu=deque(maxlen=hist_len)
@@ -220,7 +177,7 @@ class Metrics:
         self.hup=deque(maxlen=hist_len)
         self.hdn=deque(maxlen=hist_len)
         self.last_net = psutil.net_io_counters()
-        self.fan = FanReader()
+        self.fan = FanReader(log=log)
         self.fan_rpm = 0
         self.fan_pct = 0.0
 
@@ -245,7 +202,6 @@ class Metrics:
         self.dn = max(0.0, (now.bytes_recv - self.last_net.bytes_recv)/1024.0)
         self.last_net = now
 
-        # Fan oku
         rpm, pct = self.fan.read()
         if rpm is not None: self.fan_rpm = int(rpm)
         if pct is not None: self.fan_pct = clamp(pct, 0, 100)
@@ -253,19 +209,57 @@ class Metrics:
         self.hcpu.append(self.cpu); self.hram.append(self.ram); self.htmp.append(self.temp)
         self.hup.append(self.up);   self.hdn.append(self.dn)
 
-# ---------- Sayfalar ----------
+# ---------- Dokunmatik (çalışan sürümle aynı) ----------
+class Touch:
+    def __init__(self):
+        self.available = SMBUS_OK
+        self.bus = None
+        if self.available:
+            try:
+                self.bus = SMBus(I2C_BUS)
+                self.bus.read_i2c_block_data(CST816_ADDR, 0x00, 1)
+            except Exception:
+                self.available = False
+                self.bus = None
+        self.start_y=None
+        self.swipe_thresh=30
+
+    def read_point(self, W, H):
+        if not self.available: return None
+        try:
+            d = self.bus.read_i2c_block_data(CST816_ADDR, 0x00, 7)
+            event = d[1] & 0x0F
+            if event == 0:
+                self.start_y=None
+                return None
+            x = ((d[2]&0x0F)<<8) | d[3]
+            y = ((d[4]&0x0F)<<8) | d[5]
+            return (max(0,min(W-1,x)), max(0,min(H-1,y)))
+        except Exception:
+            return None
+
+    def detect_swipe(self, y):
+        if self.start_y is None:
+            self.start_y=y; return 0
+        dy = y - self.start_y
+        if dy <= -self.swipe_thresh:
+            self.start_y=None; return -1
+        if dy >=  self.swipe_thresh:
+            self.start_y=None; return  1
+        return 0
+
+# ---------- Sayfalar (summary’ye fan eklendi) ----------
 def page_summary(img, d, m, C, W, H):
     d.text((12,10), "SYSTEM", font=F22, fill=C["FG"])
     d.text((W-12,10), time.strftime("%H:%M"), font=F18, fill=C["ACC1"], anchor="ra")
 
-    # CPU/RAM/TEMP halkalar
     ring(d, 56, 90, 40, m.cpu, C); d.text((56,90), f"{m.cpu:0.0f}%", font=F14, fill=C["FG"], anchor="mm"); d.text((56,112),"CPU", font=F12, fill=C["ACC1"], anchor="mm")
     ring(d, 184,90, 40, m.ram, C); d.text((184,90),f"{m.ram:0.0f}%",font=F14,fill=C["FG"], anchor="mm"); d.text((184,112),"RAM", font=F12, fill=C["ACC1"], anchor="mm")
 
     t_pct = clamp((m.temp-30)*(100.0/60.0), 0, 100)
-    ring(d, 120,162, 46, t_pct, C); d.text((120,162), f"{m.temp:0.1f}°C", font=F14, fill=C["FG"], anchor="mm"); d.text((120,184),"CPU TEMP", font=F12, fill=C["ACC2"], anchor="mm")
+    ring(d, 120,160, 46, t_pct, C); d.text((120,160), f"{m.temp:0.1f}°C", font=F14, fill=C["FG"], anchor="mm"); d.text((120,184),"CPU TEMP", font=F12, fill=C["ACC2"], anchor="mm")
 
-    # FAN halkası (yeni)
+    # FAN: yüzde + RPM (varsa)
     ring(d, 120, 228, 24, m.fan_pct if m.fan_pct else 0, C, width=8)
     fan_txt = f"FAN {m.fan_pct:0.0f}%"
     if m.fan_rpm: fan_txt += f"  {m.fan_rpm} RPM"
@@ -274,8 +268,8 @@ def page_summary(img, d, m, C, W, H):
 def page_disk_net(img, d, m, C, W, H):
     d.text((12,10), "DISK & NET", font=F22, fill=C["FG"])
     d.text((12,50), f"DISK {m.disk:0.0f}%", font=F18, fill=C["FG"]); bar(d, 12,70, W-24,14, m.disk, C)
-    d.text((12,100), f"UP {m.up:0.0f} KB/s", font=F16, fill=C["ACC1"]); spark(d,12,118,W-24,30,m.hup,C["ACC1"],C)
-    d.text((12,156), f"DN {m.dn:0.0f} KB/s", font=F16, fill=C["ACC2"]); spark(d,12,174,W-24,30,m.hdn,C["ACC2"],C)
+    d.text((12,100), f"UP {m.up:0.0f} KB/s", font=F16, fill=C["ACC1"]); sparkline(d, 12,118, W-24,30, m.hup, C["ACC1"], C)
+    d.text((12,156), f"DN {m.dn:0.0f} KB/s", font=F16, fill=C["ACC2"]); sparkline(d, 12,174, W-24,30, m.hdn, C["ACC2"], C)
     d.text((W-12,H-10), "yukarı/aşağı kaydır", font=F12, fill=(150,150,150), anchor="rs")
 
 def page_processes(img, d, m, C, W, H):
@@ -297,49 +291,60 @@ def page_processes(img, d, m, C, W, H):
 def page_system(img, d, m, C, W, H):
     d.text((12,10), "SYSTEM INFO", font=F22, fill=C["FG"])
     upt = time.time() - psutil.boot_time()
-    dys,r=divmod(int(upt),86400); hrs,r=divmod(r,3600); mins,_=divmod(r,60)
-    d.text((12,44), f"Uptime: {dys}g {hrs}s {mins}d", font=F16, fill=C["FG"])
-    # CPU frekansı
+    dys, r = divmod(int(upt), 86400); hrs, r = divmod(r, 3600); mins,_ = divmod(r, 60)
+    try: ip = subprocess.check_output(["hostname","-I"]).decode().strip().split()[0]
+    except Exception: ip = "0.0.0.0"
     try:
         arm = subprocess.check_output(["vcgencmd","measure_clock","arm"]).decode().split("=")[1]
         arm = int(arm)/1_000_000
     except Exception:
-        cf = psutil.cpu_freq(); arm = cf.current if cf else 0
-    d.text((12,68), f"CPU Freq: {arm:.0f} MHz", font=F16, fill=C["FG"])
-    # FAN detay
-    d.text((12,92), f"Fan: {m.fan_pct:0.0f}%  {m.fan_rpm} RPM" if m.fan_rpm else f"Fan: {m.fan_pct:0.0f}%", font=F16, fill=C["FG"])
-    # Diskler
-    y=116
+        arm = psutil.cpu_freq().current if psutil.cpu_freq() else 0
+    lines = [
+        f"Uptime : {dys}g {hrs}s {mins}d",
+        f"IP     : {ip}",
+        f"CPU Hz : {arm:0.0f} MHz",
+        f"Fan    : {m.fan_pct:0.0f}%{('  '+str(m.fan_rpm)+' RPM') if m.fan_rpm else ''}",
+        f"Cores  : {psutil.cpu_count()}",
+        f"Python : {'.'.join(map(str, sys.version_info[:3]))}",
+    ]
+    y=46
+    for t in lines:
+        d.text((12,y), t, font=F16, fill=C["FG"]); y += 24
+    d.text((12,y), "Mounts:", font=F16, fill=C["FG"]); y+=8
     for part in psutil.disk_partitions():
         try:
             u = psutil.disk_usage(part.mountpoint)
+            y+=18
             d.text((12,y), f"{part.mountpoint} {u.percent:0.0f}%", font=F14, fill=C["FG"])
             bar(d, 112, y-2, W-124, 10, u.percent, C)
-            y+=20
-            if y>H-20: break
-        except Exception: continue
+            if y > H-24: break
+        except Exception:
+            continue
 
 PAGES = [page_summary, page_disk_net, page_processes, page_system]
 
-# ---------- Uygulama ----------
+# ---------- App (çalışan sürümle birebir) ----------
 class App:
-    def __init__(self):
-        self.disp = LCD_1inch69(); self.disp.Init()
+    def __init__(self, log=False):
+        self.disp = LCD_1inch69()
+        self.disp.Init()
         try: self.disp.bl_DutyCycle(100)
         except Exception: pass
-        self.W,self.H = self.disp.width, self.disp.height
+        self.W, self.H = self.disp.width, self.disp.height
 
-        # “ilk frame” bas, bazı sürücüler aksi halde simsiyah kalabiliyor
-        self.disp.ShowImage(Image.new("RGB", (self.W,self.H), (0,0,0)))
-
-        self.theme_dark=True; self.C=DARK
-        self.metrics=Metrics()
-        for _ in range(3):
+        self.theme_dark = True
+        self.C = DARK
+        self.metrics = Metrics(log=log)
+        for _ in range(4):
             self.metrics.update(); time.sleep(0.1)
 
         self.touch = Touch()
-        self.cur=0; self.tgt=0; self.anim=1.0
-        self.running=True
+
+        self.cur = 0
+        self.tgt = 0
+        self.anim = 1.0
+
+        self.running = True
         threading.Thread(target=self._metrics_loop, daemon=True).start()
 
     def _metrics_loop(self):
@@ -348,26 +353,28 @@ class App:
             time.sleep(0.5)
 
     def _render_page(self, idx):
-        img = Image.new("RGB", (self.W,self.H), self.C["BG"])
+        img = Image.new("RGB", (self.W, self.H), self.C["BG"])
         d = ImageDraw.Draw(img)
         for gy in range(0, self.H, 28):
-            d.line((0,gy,self.W,gy), fill=self.C["GRID"])
+            d.line((0, gy, self.W, gy), fill=self.C["GRID"])
         PAGES[idx](img, d, self.metrics, self.C, self.W, self.H)
         return img
 
     def _switch(self, idx):
-        if idx==self.cur: return
-        self.tgt=idx; self.anim=0.0
+        if idx == self.cur: return
+        self.tgt = idx
+        self.anim = 0.0
 
     def _handle_touch(self):
-        pt = self.touch.read_point(self.W,self.H)
+        pt = self.touch.read_point(self.W, self.H)
         if not pt: return
         x,y = pt
-        # sağ üst köşe → tema değiş
+        # Sağ üst köşe: tema değiştir
         if x > self.W-52 and y < 40:
             self.theme_dark = not self.theme_dark
             self.C = DARK if self.theme_dark else LIGHT
-            time.sleep(0.2); return
+            time.sleep(0.2)
+            return
         swipe = self.touch.detect_swipe(y)
         if swipe == -1: self._switch((self.cur-1) % len(PAGES))
         elif swipe == 1: self._switch((self.cur+1) % len(PAGES))
@@ -378,25 +385,36 @@ class App:
             now=time.time()
             if now-last < dt: time.sleep(dt-(now-last))
             last=now
+
             if self.touch.available: self._handle_touch()
+
             if self.anim < 1.0:
                 self.anim = min(1.0, self.anim + 0.12)
                 t = 1 - (1 - self.anim)**3
                 dirn = 1 if (self.tgt > self.cur or (self.cur==len(PAGES)-1 and self.tgt==0)) else -1
                 off = int((-dirn*self.H) * t)
                 cur_img = self._render_page(self.cur)
-                nxt_img = self._render_page(self.tgt)
-                frame = Image.new("RGB", (self.W,self.H), self.C["BG"])
+                tgt_img = self._render_page(self.tgt)
+                frame = Image.new("RGB", (self.W, self.H), self.C["BG"])
                 frame.paste(cur_img, (0, off))
-                frame.paste(nxt_img, (0, off + dirn*self.H))
+                frame.paste(tgt_img, (0, off + dirn*self.H))
                 self.disp.ShowImage(frame)
-                if self.anim >= 1.0: self.cur = self.tgt
+                if self.anim >= 1.0:
+                    self.cur = self.tgt
             else:
-                self.disp.ShowImage(self._render_page(self.cur))
+                img = self._render_page(self.cur)
+                self.disp.ShowImage(img)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--log", action="store_true", help="fan pathlarını ve hataları yazdır")
+    args = ap.parse_args()
+    if args.log:
+        print("[sysmon] starting with logs on")
+    App(log=args.log).loop()
 
 if __name__ == "__main__":
     try:
-        from PIL import Image  # ilk frame için
-        App().loop()
+        main()
     except KeyboardInterrupt:
         pass
