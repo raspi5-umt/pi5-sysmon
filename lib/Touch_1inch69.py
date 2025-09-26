@@ -1,6 +1,6 @@
+# lib/Touch_1inch69.py
 import time
-import config
-from Touch_1inch69 import Touch_1inch69
+from lib import config
 
 class Touch_1inch69(config.RaspberryPi):
 
@@ -75,6 +75,7 @@ class Touch_1inch69(config.RaspberryPi):
         
         self.X_point=x_point
         self.Y_point=y_point
+
 
 
 
