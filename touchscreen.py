@@ -3,7 +3,7 @@ import time
 from smbus2 import SMBus
 
 ADDR = 0x15   # CST816S dokunmatik çip adresi
-BUS = 14      # hangi i2c bus’ta olduğunu bulmuştun: 13 veya 14 dene
+BUS = 15      # hangi i2c bus’ta olduğunu bulmuştun: 13 veya 14 dene
 
 def read_touch(bus):
     try:
