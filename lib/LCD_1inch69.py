@@ -1,7 +1,7 @@
-
+# lib/LCD_1inch69.py
 import time
-import config
-from Touch_1inch69 import Touch_1inch69
+from lib import config
+from lib.Touch_1inch69 import Touch_1inch69
 
 class LCD_1inch69(config.RaspberryPi):
     width = 240
@@ -228,6 +228,7 @@ class LCD_1inch69(config.RaspberryPi):
         for i in range(0, len(_buffer), 4096):
             self.spi_writebyte(_buffer[i: i+4096])
         
+
 
 
 
