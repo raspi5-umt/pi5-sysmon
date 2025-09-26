@@ -7,7 +7,7 @@
 # - 4 sayfa: Özet, Disk&Net, Süreçler, Sistem
 # - Sparkline çizgiler Numpy'sız, NaN güvenli
 # - Yumuşak sayfa geçiş animasyonu
-
+from lib.LCD_1inch69 import LCD_1inch69
 import os, sys, time, math, threading, subprocess
 from collections import deque
 from PIL import Image, ImageDraw, ImageFont
