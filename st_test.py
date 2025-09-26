@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Raspberry Pi 5 • 1.69" (240x280) ekran için "NASA tarzı" sistem paneli
+# Raspberry Pi 5 • 1.69" (240x280) ekran için "NASA tarzı" sistem paneli + FAN
 # - Görüntü:   lib/LCD_1inch69.py (üretici sürücüsü)
 # - Dokunmatik: I2C CST816S (addr 0x15) – yukarı/aşağı swipe ile sayfa geçişi
 # - Sayfalar:   Özet • Disk & Net • Süreçler • Sistem
 # - Tema:       Sağ üst köşeye dokununca Koyu/Açık
+# - Fan:        hwmon -> fan*_input (RPM), pwm1 (%), thermal cooling_device (state %) fallback
 # - Güvenli çizim: NumPy yok, NaN/inf filtreli
 
 import os, sys, time, math, threading, subprocess
@@ -26,6 +27,77 @@ except Exception:
 
 I2C_BUS = 1
 CST816_ADDR = 0x15
+
+# ---------- FAN Okuyucu (EK) ----------
+class FanReader:
+    """
+    1) /sys/class/hwmon/hwmon*/fan*_input -> RPM
+    2) /sys/class/hwmon/hwmon*/pwm1      -> duty (0..255) -> %
+    3) /sys/class/thermal/cooling_device*/cur_state,max_state -> %
+    Ne bulursa onu döndürür: (rpm, percent)
+    """
+    def __init__(self):
+        self.fan_input = None
+        self.pwm1 = None
+        self.cool_cur = None
+        self.cool_max = None
+        self._discover()
+
+    def _ls(self, root):
+        try:
+            return [os.path.join(root, x) for x in os.listdir(root)]
+        except Exception:
+            return []
+
+    def _discover(self):
+        # 1) hwmon
+        for hw in self._ls("/sys/class/hwmon"):
+            for node in self._ls(hw):
+                # fan*_input
+                for f in self._ls(node):
+                    base = os.path.basename(f)
+                    if base.startswith("fan") and base.endswith("_input"):
+                        self.fan_input = f
+                # pwm1
+                p = os.path.join(node, "pwm1")
+                if os.path.exists(p):
+                    self.pwm1 = p
+            if self.fan_input or self.pwm1:
+                return
+        # 2) thermal cooling_device
+        for cd in self._ls("/sys/class/thermal"):
+            if not os.path.basename(cd).startswith("cooling_device"):
+                continue
+            cur = os.path.join(cd, "cur_state")
+            mx  = os.path.join(cd, "max_state")
+            if os.path.exists(cur) and os.path.exists(mx):
+                self.cool_cur, self.cool_max = cur, mx
+                return
+
+    def _read_int(self, path):
+        try:
+            with open(path) as f:
+                return int(f.read().strip())
+        except Exception:
+            return None
+
+    def read(self):
+        rpm = None
+        pct = None
+        if self.fan_input:
+            v = self._read_int(self.fan_input)
+            if v is not None:
+                rpm = max(0, v)
+        if self.pwm1:
+            v = self._read_int(self.pwm1)
+            if v is not None:
+                pct = max(0.0, min(100.0, (v/255.0)*100.0))
+        if pct is None and self.cool_cur and self.cool_max:
+            cur = self._read_int(self.cool_cur)
+            mx  = self._read_int(self.cool_max)
+            if cur is not None and mx not in (None,0):
+                pct = max(0.0, min(100.0, (cur/mx)*100.0))
+        return rpm, pct
 
 # ---------- Tema Renkleri ----------
 DARK = dict(
@@ -113,6 +185,10 @@ class Metrics:
         self.hup=deque(maxlen=hist_len)
         self.hdn=deque(maxlen=hist_len)
         self.last_net = psutil.net_io_counters()
+        # FAN (EK)
+        self.fan = FanReader()
+        self.fan_rpm = 0
+        self.fan_pct = 0.0
 
     def _temp(self):
         try:
@@ -134,6 +210,13 @@ class Metrics:
         self.up = max(0.0, (now.bytes_sent - self.last_net.bytes_sent)/1024.0)
         self.dn = max(0.0, (now.bytes_recv - self.last_net.bytes_recv)/1024.0)
         self.last_net = now
+
+        # FAN oku (EK)
+        rpm, pct = self.fan.read()
+        if rpm is not None:
+            self.fan_rpm = int(rpm)
+        if pct is not None:
+            self.fan_pct = max(0.0, min(100.0, float(pct)))
 
         self.hcpu.append(self.cpu); self.hram.append(self.ram); self.htmp.append(self.temp)
         self.hup.append(self.up);   self.hdn.append(self.dn)
@@ -189,6 +272,14 @@ def page_summary(img, d, m, C, W, H):
     t_pct = clamp((m.temp-30)*(100.0/60.0),0,100)
     ring(d, 120,170, 48, t_pct, C); d.text((120,170), f"{m.temp:0.1f}°C", font=F14, fill=C["FG"], anchor="mm"); d.text((120,196),"TEMP", font=F12, fill=C["ACC2"], anchor="mm")
 
+    # FAN halka + metin (EK)
+    ring(d, 120, 228, 24, m.fan_pct if m.fan_pct else 0, C, width=8)
+    fan_txt = "FAN "
+    if m.fan_pct: fan_txt += f"{m.fan_pct:0.0f}%"
+    else:         fan_txt += "N/A"
+    if m.fan_rpm: fan_txt += f"  {m.fan_rpm} RPM"
+    d.text((120,228), fan_txt, font=F12, fill=C["FG"], anchor="mm")
+
     d.text((12,212), "CPU history", font=F12, fill=C["FG"])
     sparkline(d, 12,228, W-24,36, m.hcpu, C["ACC1"], C, grid=True)
 
@@ -229,11 +320,13 @@ def page_system(img, d, m, C, W, H):
         arm = subprocess.check_output(["vcgencmd","measure_clock","arm"]).decode().split("=")[1]
         arm = int(arm)/1_000_000
     except Exception:
-        arm = psutil.cpu_freq().current if psutil.cpu_freq() else 0
+        cf = psutil.cpu_freq()
+        arm = cf.current if cf else 0
     lines = [
         f"Uptime : {dys}g {hrs}s {mins}d",
         f"IP     : {ip}",
         f"CPU Hz : {arm:0.0f} MHz",
+        f"Fan    : {(str(int(m.fan_pct))+'%') if m.fan_pct else 'N/A'}{('  '+str(m.fan_rpm)+' RPM') if m.fan_rpm else ''}",
         f"Cores  : {psutil.cpu_count()}",
         f"Python : {'.'.join(map(str, sys.version_info[:3]))}",
     ]
