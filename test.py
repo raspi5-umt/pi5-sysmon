@@ -15,8 +15,8 @@ except ImportError:
 CST816_ADDR = 0x15
 I2C_BUS = 1  # gerekirse 13/14 deneyebilirsin
 
-SWAP_XY  = True
-INVERT_X = True
+SWAP_XY  = False
+INVERT_X = False
 INVERT_Y = False
 
 # Başlangıçta kaba tahmin; otomatik öğrenme bunları güncelleyecek:
