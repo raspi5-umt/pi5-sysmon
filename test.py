@@ -1,36 +1,35 @@
 import time
 from PIL import Image, ImageDraw
-from lib.LCD_1inch69 import LCD_1inch69
-from lib.Touch_1inch69 import Touch_1inch69
+from LCD_1inch69 import LCD_1inch69
+from Touch_1inch69 import Touch_1inch69
 
-W, H = 240, 280  
+W, H = 240, 280
 
 lcd = LCD_1inch69()
 lcd.Init()
 touch = Touch_1inch69()
 
-def scale_map(x, y, w, h, raw_max_x=4095, raw_max_y=4095):
-    """Ham koordinatları ekrana ölçekle"""
-    sx = int(x / raw_max_x * w)
-    sy = int(y / raw_max_y * h)
-    return sx, sy
-
 print("Dokunmatik test başlıyor... (CTRL+C ile çık)")
 
 try:
     while True:
-        if touch.is_pressed():   # dokunma varsa
-            pos = touch.read()   # koordinat oku
-            if pos:
-                rx, ry = pos
-                x, y = scale_map(rx, ry, W, H)
+        pos = None
+        try:
+            pos = touch.Touch_Read()   # varsa Touch_Read kullan
+        except AttributeError:
+            try:
+                pos = touch.read()     # bazı sürümlerde read()
+            except AttributeError:
+                pass
 
-                print(f"RAW=({rx},{ry})  SCALED=({x},{y})")
+        if pos:
+            x, y = pos
+            print(f"TOUCH: ({x},{y})")
 
-                img = Image.new("RGB", (W, H), "black")
-                d = ImageDraw.Draw(img)
-                d.ellipse((x-3, y-3, x+3, y+3), fill="red")
-                lcd.ShowImage(img)
+            img = Image.new("RGB", (W, H), "black")
+            d = ImageDraw.Draw(img)
+            d.ellipse((x-4, y-4, x+4, y+4), fill="red")
+            lcd.ShowImage(img)
 
         time.sleep(0.05)
 
