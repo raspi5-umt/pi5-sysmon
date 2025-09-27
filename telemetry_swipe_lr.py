@@ -267,7 +267,7 @@ class Touch:
 
 # --------- SAYFALAR ----------
 def page_thermal(img,d,m,C,W,H):
-    header(d,C,W,"THERMAL")
+    header(d,C,W,"THERMAL222")
     t_pct = clamp((m.temp-30)*(100/60),0,100)
     ring(d, 120, 108, 64, t_pct, C, width=14)
     d.text((120,108), f"{m.temp:.1f}°C", font=F18, fill=C["FG"], anchor="mm")
