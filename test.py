@@ -16,7 +16,7 @@ CST816_ADDR = 0x15
 I2C_BUS = 1  # gerekirse 13/14 deneyebilirsin
 
 # ---- Ekran yön düzeltmeleri ----
-SWAP_XY  = True   # True yap ve tekrar dene: bazı panellerde X/Y ters gelir
+SWAP_XY  = False   # True yap ve tekrar dene: bazı panellerde X/Y ters gelir
 INVERT_X = False   # True yap ve tekrar dene: X ekseni ters ise
 INVERT_Y = True   # True yap ve tekrar dene: Y ekseni ters ise
 
