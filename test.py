@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Waveshare 1.69" (240x280) Touch LCD • Raspberry Pi 5
-# Smartwatch tarzı Sistem Paneli (renkli, büyük puntolar, iyileştirmeler)
-# - Dokunmatik: Waveshare Touch_1inch69 akışı (senin çalışan örnekle aynı)
-# - Sol/sağ: sayfalar (debounce'lu)
-# - Yukarı/aşağı (TERS): System sayfasında dikey scroll (senin tercihine göre)
-# - Tipografi ve boşluklar büyütüldü, mavi/pembe yok
+# Smartwatch tarzı Sistem Paneli
+# İyileştirmeler: RAM/Storage küçük punto detay, Top Processes siyah boşluk fix,
+# fan toggle butonu, tema sadece sağ üst tap ile.
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
@@ -14,31 +12,25 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.append("..")
 from lib import LCD_1inch69, Touch_1inch69
 
-# ---------- RPi pinleri ----------
-RST = 27
-DC  = 25
-BL  = 18
-TP_INT = 4
-TP_RST = 17
-
-# ---------- Dokunmatik durumu ----------
-Mode = 2
-Flag = 0
+# --- RPi & Touch ---
+RST, DC, BL = 27, 25, 18
+TP_INT, TP_RST = 4, 17
+Mode, Flag = 2, 0
 touch = None
 
-# ---------- Debounce / Cooldown ----------
+# --- Debounce ---
 SWIPE_COOLDOWN_MS  = 600
-SCROLL_COOLDOWN_MS = 100   # hızlandırıldı
+SCROLL_COOLDOWN_MS = 100
 TAP_COOLDOWN_MS    = 250
-
 last_gesture_time_ms = 0
 last_gesture_code    = 0
 last_scroll_time_ms  = 0
 last_tap_time_ms     = 0
+last_button_time_ms  = 0   # fan buton
 
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Tema (mavi/pembe yok) ----------
+# --- Tema (mavi/pembe yok) ---
 DARK = dict(
     BG=(10,12,18), FG=(242,244,248),
     TEAL=(50,190,165), ORANGE=(245,145,50), VIOLET=(160,120,250),
@@ -69,7 +61,7 @@ def load_font(sz):
     from PIL import ImageFont as IF
     return IF.load_default()
 
-# Büyük puntolar (başlık hariç metinler iri)
+# büyük puntolar
 F12,F14,F16,F18,F20,F22,F24,F26,F28,F30,F32,F36 = (load_font(s) for s in (12,14,16,18,20,22,24,26,28,30,32,36))
 
 def clamp(v, lo, hi):
@@ -80,19 +72,17 @@ def clamp(v, lo, hi):
         v = 0.0
     return max(lo, min(hi, v))
 
-def now_ms():
-    return int(time.time()*1000)
+def now_ms(): return int(time.time()*1000)
+def bytes_gb(b): return b/1024/1024/1024
 
-# ---------- Çizim yardımcıları ----------
-def rounded_fill(d, box, radius, fill):
-    d.rounded_rectangle(box, radius=radius, fill=fill)
+# --- Çizim yardımcıları ---
+def rounded_fill(d, box, radius, fill): d.rounded_rectangle(box, radius=radius, fill=fill)
 
-def chip(d, x, y, text, bg, fg):
-    padx, pady = 7, 4
-    w = int(d.textlength(text, font=F18)) + 2*padx
-    h = 24
+def chip(d, x, y, text, bg, fg, font=F18, pad=7):
+    w = int(d.textlength(text, font=font)) + 2*pad
+    h = 24 if font.size >= 18 else 20
     d.rounded_rectangle((x,y,x+w,y+h), radius=10, fill=bg)
-    d.text((x+padx, y+2), text, font=F18, fill=fg)
+    d.text((x+pad, y+2), text, font=font, fill=fg)
     return w, h
 
 def ring(d, cx, cy, r, pct, track, color, width=14):
@@ -127,7 +117,7 @@ def sparkline(d, x,y,w,h,series,color,grid_col):
         if prev: d.line((prev[0],prev[1],px,py), fill=color, width=3)
         prev=(px,py)
 
-# ---------- Metrikler ----------
+# --- Metrikler ---
 try:
     import psutil
 except Exception:
@@ -178,7 +168,6 @@ class Metrics:
                 pass
 
     def _disk_totals(self):
-        # Root üzerinden toplam/used; istersen tüm mount'ları da toplayabilirdik
         try:
             if psutil:
                 u = psutil.disk_usage("/")
@@ -195,22 +184,15 @@ class Metrics:
             pass
 
     def update(self):
-        # CPU
         if psutil:
             try: self.cpu = clamp(psutil.cpu_percent(interval=None), 0, 100)
             except Exception: pass
         else:
             try: self.cpu = clamp(os.getloadavg()[0]*25.0, 0, 100)
             except Exception: pass
-
-        # RAM ve Disk detayları
         self._mem_totals()
         self._disk_totals()
-
-        # Sıcaklık
         self.temp = clamp(self._temp(), 0, 120)
-
-        # Ağ
         if psutil:
             try:
                 now = psutil.net_io_counters()
@@ -220,35 +202,92 @@ class Metrics:
                 self.last_net = now
             except Exception:
                 pass
-
-        # history
         self.hcpu.append(self.cpu); self.hram.append(self.ram); self.htmp.append(self.temp)
         self.hup.append(self.up);   self.hdn.append(self.dn)
 
-# ---------- SYSTEM (scrollable) ----------
-def bytes_gb(b): return b/1024/1024/1024
+# --- Fan Controller ---
+class FanControl:
+    def __init__(self):
+        self.pwm_path = None
+        self.pwm_enable = None
+        self.cool_cur = None
+        self.cool_max = None
+        self.state = 0  # 0 kapalı, 1 açık
+        self._discover()
 
-def render_system_scrollable(W, H, m, C):
+    def _ls(self, root):
+        try: return [os.path.join(root, x) for x in os.listdir(root)]
+        except Exception: return []
+
+    def _discover(self):
+        # hwmon pwm
+        for hw in self._ls("/sys/class/hwmon"):
+            for node in self._ls(hw):
+                p = os.path.join(node, "pwm1")
+                if os.path.exists(p):
+                    self.pwm_path = p
+                    e = os.path.join(node, "pwm1_enable")
+                    if os.path.exists(e): self.pwm_enable = e
+                    return
+        # thermal cooling_device
+        for cd in self._ls("/sys/class/thermal"):
+            if not os.path.basename(cd).startswith("cooling_device"):
+                continue
+            cur = os.path.join(cd, "cur_state")
+            mx  = os.path.join(cd, "max_state")
+            if os.path.exists(cur) and os.path.exists(mx):
+                self.cool_cur, self.cool_max = cur, mx
+                return
+
+    def set_percent(self, pct):
+        pct = clamp(pct, 0, 100)
+        try:
+            if self.pwm_path:
+                if self.pwm_enable:
+                    # 1: enable manual
+                    open(self.pwm_enable, "w").write("1\n")
+                val = int(255 * pct/100.0)
+                open(self.pwm_path, "w").write(str(val) + "\n")
+                self.state = 1 if pct > 0 else 0
+                return True
+            elif self.cool_cur and self.cool_max:
+                mx = int(open(self.cool_max).read().strip() or "0")
+                target = int(mx if pct > 0 else 0)
+                open(self.cool_cur, "w").write(str(target) + "\n")
+                self.state = 1 if pct > 0 else 0
+                return True
+        except Exception:
+            pass
+        return False
+
+    def toggle(self):
+        if self.state:
+            return self.set_percent(0)
+        else:
+            return self.set_percent(100)
+
+# --- SYSTEM sayfası (scrollable) ---
+def render_system_scrollable(W, H, m, C, fan_on):
     y = 0
     content_h_min = H + 1
-    img = Image.new("RGB", (W, max(content_h_min, 900)), C["BG"])
+    img = Image.new("RGB", (W, max(content_h_min, 1100)), C["BG"])
     d = ImageDraw.Draw(img)
 
-    # App bar (System başlığı küçültüldü)
+    # App bar (System daha küçük)
     rounded_fill(d, (8,6, W-8, 78), radius=14, fill=C["SURFACE"])
-    d.text((18, 20), "System", font=F32, fill=C["FG"])  # daha küçük
+    d.text((18, 20), "System", font=F32, fill=C["FG"])
     hhmm = time.strftime("%H:%M")
     day  = time.strftime("%a %d %b")
     d.text((W-12, 16), hhmm, font=F30, fill=C["TEAL"], anchor="ra")
     d.text((W-98, 48), day,  font=F16, fill=(200,205,210))
     y = 90
 
-    # Temperature (etiket ile derece arasında boşluk artırıldı)
+    # Temperature
     rounded_fill(d, (8,y, W-8, y+116), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Temperature", C["ORANGE"], (0,0,0))
     t_pct = clamp((m.temp-30)*(100.0/60.0), 0, 100)
     ring(d, 58, y+68, 30, t_pct, track=C["BARBG"], color=C["ORANGE"], width=14)
-    d.text((100, y+36), f"{m.temp:0.1f}°C", font=F30, fill=C["FG"])  # daha aşağıda
+    d.text((100, y+36), f"{m.temp:0.1f}°C", font=F30, fill=C["FG"])
     bar(d, 100, y+76, W-100-16, 12, t_pct, color=C["ORANGE"], track=C["BARBG"])
     y += 128
 
@@ -260,21 +299,23 @@ def render_system_scrollable(W, H, m, C):
     sparkline(d, 100, y+70, W-100-16, 46, m.hcpu, C["VIOLET"], C["GRID"])
     y += 140
 
-    # RAM (Used / Total göster)
-    rounded_fill(d, (8,y, W-8, y+110), radius=14, fill=C["SURFACE2"])
+    # RAM (yüzde büyük, alt satır küçük punto used/total)
+    rounded_fill(d, (8,y, W-8, y+116), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "RAM", C["TEAL"], (0,0,0))
     used_gb  = bytes_gb(m.mem_used)
     total_gb = bytes_gb(m.mem_total)
-    d.text((16, y+44), f"{m.ram:0.0f}%  ({used_gb:.1f} / {total_gb:.1f} GB)", font=F24, fill=C["FG"])
-    bar(d, 16, y+78, W-16-16, 14, m.ram, color=C["TEAL"], track=C["BARBG"])
-    y += 122
+    d.text((16, y+42), f"{m.ram:0.0f}%", font=F30, fill=C["FG"])
+    d.text((16, y+72), f"{used_gb:.1f} / {total_gb:.1f} GB", font=F18, fill=(200,205,210))  # küçük punto
+    bar(d, 16, y+92, W-16-16, 14, m.ram, color=C["TEAL"], track=C["BARBG"])
+    y += 128
 
-    # Storage (toplam/kullanılan bar + metin)
+    # Storage (yüzde bar + alt satır küçük punto used/total)
     rounded_fill(d, (8,y, W-8, y+118), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Storage", C["AMBER"], (0,0,0))
     du = (bytes_gb(m.disk_used), bytes_gb(m.disk_total))
-    d.text((16, y+44), f"Used {du[0]:.1f} / Total {du[1]:.1f} GB", font=F24, fill=C["FG"])
-    bar(d, 16, y+78, W-16-16, 14, m.disk, color=C["LIME"], track=C["BARBG"])
+    d.text((16, y+42), f"{m.disk:0.0f}%", font=F30, fill=C["FG"])
+    d.text((16, y+72), f"{du[0]:.1f} / {du[1]:.1f} GB", font=F18, fill=(200,205,210))  # küçük punto
+    bar(d, 16, y+92, W-16-16, 14, m.disk, color=C["LIME"], track=C["BARBG"])
     y += 130
 
     # Network
@@ -284,8 +325,8 @@ def render_system_scrollable(W, H, m, C):
     d.text((16, y+74), f"Dn {m.dn:0.0f} KB/s", font=F22, fill=C["ORANGE"])
     y += 112
 
-    # System Info (hizalama ve boşluklar iyileştirildi)
-    rounded_fill(d, (8,y, W-8, y+150), radius=14, fill=C["SURFACE2"])
+    # System Info (hizalı satırlar, bol aralık)
+    rounded_fill(d, (8,y, W-8, y+160), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "System Info", C["LIME"], (0,0,0))
     try:
         boot = psutil.boot_time() if psutil else time.time()-1
@@ -310,8 +351,8 @@ def render_system_scrollable(W, H, m, C):
     except Exception:
         la1=la5=la15=0.0
 
-    label_x = 16; value_x = 120
-    line_y = y+46; line_h = 26
+    label_x, value_x = 16, 120
+    line_y, line_h  = y+46, 28
     def row(lbl, val):
         nonlocal line_y
         d.text((label_x, line_y), lbl, font=F20, fill=(200,205,210))
@@ -322,10 +363,10 @@ def render_system_scrollable(W, H, m, C):
     row("IP",     ip)
     row("CPU Hz", f"{arm:0.0f} MHz")
     row("Load",   f"{la1:.2f} {la5:.2f} {la15:.2f}")
-    y += 160
+    y += 172
 
-    # Top Processes (CPU'ya göre; yoksa MEM'e göre)
-    rounded_fill(d, (8,y, W-8, y+130), radius=14, fill=C["SURFACE2"])
+    # Top Processes (uzun pano içinde, siyah boşluk yok)
+    rounded_fill(d, (8,y, W-8, y+150), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Top Processes", C["VIOLET"], (255,255,255))
     yy = y+48
     try:
@@ -334,17 +375,15 @@ def render_system_scrollable(W, H, m, C):
             for p in psutil.process_iter(attrs=["pid","name","cpu_percent","memory_percent"]):
                 try:
                     info = p.info
-                    # CPU'yı güncelleme denemesi (bloklamadan)
-                    _ = p.cpu_percent(interval=0.0)
+                    _ = p.cpu_percent(interval=0.0)  # non-block update
                     procs.append(info)
                 except Exception:
                     pass
-            # Eğer tüm cpu_percent 0 ise, memory'e göre sırala
             if any((x.get("cpu_percent",0.0) or 0) > 0 for x in procs):
                 procs.sort(key=lambda x: x.get("cpu_percent",0.0), reverse=True)
             else:
                 procs.sort(key=lambda x: x.get("memory_percent",0.0), reverse=True)
-            for rowp in procs[:3]:
+            for rowp in procs[:4]:
                 name=str(rowp.get("name",""))[:14]
                 cpu = clamp(rowp.get("cpu_percent",0.0),0,100)
                 mem = clamp(rowp.get("memory_percent",0.0),0,100)
@@ -355,7 +394,17 @@ def render_system_scrollable(W, H, m, C):
             d.text((16,yy), "psutil yok", font=F20, fill=C["FG"])
     except Exception:
         pass
-    y += 140
+    y += 162
+
+    # FAN Toggle Button (sağ alt köşe kartı)
+    btn_h = 52
+    rounded_fill(d, (8,y, W-8, y+btn_h), radius=14, fill=C["SURFACE2"])
+    btn_text = "FAN: ON" if fan_on else "FAN: OFF"
+    btn_col  = C["TEAL"] if fan_on else C["ORANGE"]
+    chip(d, 16, y+12, btn_text, btn_col, (0,0,0), font=F18)
+    # buton alanını geri döndürmek için rectangle koordinatı döndürelim
+    btn_box = (8, y, W-8, y+btn_h)
+    y += btn_h + 12
 
     content_h = max(y+10, content_h_min)
     if content_h > img.height:
@@ -363,9 +412,9 @@ def render_system_scrollable(W, H, m, C):
         new_img.paste(img, (0,0))
         img = new_img
 
-    return img, content_h
+    return img, content_h, btn_box
 
-# ---------- Diğer sayfalar (kısa) ----------
+# --- Diğer sayfalar (basit) ---
 def page_disk_net(d, m, C, W, H):
     d.text((12,10), "DISK & NET", font=F28, fill=C["FG"])
     d.text((12,56), f"DISK {m.disk:0.0f}%", font=F24, fill=C["FG"])
@@ -400,7 +449,7 @@ def page_temp(d, m, C, W, H):
     ring(d, 120,120,66, t_pct, track=C["BARBG"], color=C["ORANGE"], width=16)
     d.text((120,120), f"{m.temp:0.1f}°C", font=F28, fill=C["FG"], anchor="mm")
 
-# ---------- Gesture callback ----------
+# --- Touch Callback ---
 def Int_Callback(btn):
     global Flag, Mode, touch
     try:
@@ -416,10 +465,9 @@ def Int_Callback(btn):
     except Exception:
         pass
 
-# ---------- Uygulama ----------
+# --- App ---
 class App:
     def __init__(self):
-        # Ekran
         self.disp = LCD_1inch69.LCD_1inch69(rst=RST, dc=DC, bl=BL, tp_int=TP_INT, tp_rst=TP_RST, bl_freq=100)
         self.disp.Init()
         self.disp.clear()
@@ -427,28 +475,28 @@ class App:
         except Exception: pass
         self.W, self.H = self.disp.width, self.disp.height  # 240x280
 
-        # Tema/Metrik
         self.dark = True
         self.C = DARK
         self.m = Metrics()
-        for _ in range(3):
-            self.m.update(); time.sleep(0.1)
+        for _ in range(3): self.m.update(); time.sleep(0.1)
 
-        # Touch
         global touch
         touch = Touch_1inch69.Touch_1inch69()
         touch.init()
         touch.Set_Mode(2)
         touch.GPIO_TP_INT.when_pressed = Int_Callback
 
-        # Sayfa ve scroll
         self.cur = 0
         self.system_canvas = None
         self.system_h = self.H
         self.scroll_y = 0
-        self.scroll_step = 56  # iri adım
+        self.scroll_step = 56
 
-        # Thread
+        self.fan = FanControl()
+        self.fan_on = False
+
+        self.btn_box = None  # fan buton pencere koordinatı (canvas'tan dönecek)
+
         self.running = True
         threading.Thread(target=self._metrics_loop, daemon=True).start()
 
@@ -458,7 +506,10 @@ class App:
             time.sleep(0.5)
 
     def _render_system_canvas(self):
-        self.system_canvas, self.system_h = render_system_scrollable(self.W, self.H, self.m, self.C)
+        img, h, btn_box = render_system_scrollable(self.W, self.H, self.m, self.C, self.fan_on)
+        self.system_canvas = img
+        self.system_h = h
+        self.btn_box = btn_box
         max_off = max(0, self.system_h - self.H)
         self.scroll_y = max(0, min(self.scroll_y, max_off))
 
@@ -481,39 +532,59 @@ class App:
                 page_temp(d, self.m, self.C, self.W, self.H)
             return img
 
-    def _maybe_toggle_theme_on_tap(self):
-        global last_tap_time_ms
-        try:
-            x, y = touch.X_point, touch.Y_point
-            if x is None or y is None:
-                return
-            if x > self.W-52 and y < 40:
-                t = now_ms()
-                if t - last_tap_time_ms > TAP_COOLDOWN_MS:
-                    last_tap_time_ms = t
-                    self.dark = not self.dark
-                    self.C = DARK if self.dark else LIGHT
+    def _tap_in_rect(self, x, y, rect):
+        if not rect: return False
+        x1,y1,x2,y2 = rect
+        return (x1 <= x <= x2) and (y1 <= y <= y2)
+
+    def _handle_single_tap_actions(self):
+        # SADECE burada tema ve fan butonunu yönetiyoruz.
+        global last_tap_time_ms, last_button_time_ms
+        t = now_ms()
+        x, y = getattr(touch, "X_point", None), getattr(touch, "Y_point", None)
+        if x is None or y is None: return False
+
+        changed = False
+
+        # Tema: SADECE sağ üst köşe (52x40) tek dokunuş
+        if x > self.W-52 and y < 40 and (t - last_tap_time_ms) > TAP_COOLDOWN_MS:
+            last_tap_time_ms = t
+            self.dark = not self.dark
+            self.C = DARK if self.dark else LIGHT
+            self.system_canvas = None
+            changed = True
+
+        # Fan buton: SADECE System sayfasında, buton görünür pencerede mi?
+        if self.cur == 0 and self.btn_box and (t - last_button_time_ms) > TAP_COOLDOWN_MS:
+            # Canvas'taki butonun pencere içi koordinatlarını hesapla
+            x1,y1,x2,y2 = self.btn_box
+            # Ekrandaki görünür dikdörtgen: (x1, y1 - scroll_y) .. (x2, y2 - scroll_y)
+            if self._tap_in_rect(x, y + self.scroll_y, (x1,y1,x2,y2)):
+                last_button_time_ms = t
+                if self.fan.toggle():
+                    self.fan_on = self.fan.state == 1
                     self.system_canvas = None
-        except Exception:
-            pass
+                    changed = True
+
+        return changed
 
     def _handle_gesture(self):
         global last_gesture_time_ms, last_gesture_code, last_scroll_time_ms
         g = getattr(touch, "Gestures", 0)
-        if not g:
-            self._maybe_toggle_theme_on_tap()
-            return False
-
         t = now_ms()
 
-        # sol/sağ sayfa gezinmesi için debounce
+        # Jest yoksa tek-tap aksiyonuna bak
+        if not g:
+            return self._handle_single_tap_actions()
+
+        # sol/sağ sayfa debounce
         if g in (0x03,0x04) and g == last_gesture_code and (t - last_gesture_time_ms) < SWIPE_COOLDOWN_MS:
             touch.Gestures = 0
             return False
 
         changed = False
 
-        # DİKEY SCROLL (TERS): DOWN => içerikte YUKARI, UP => içerikte AŞAĞI
+        # DİKEY SCROLL (TERS): DOWN => içerik YUKARI, UP => içerik AŞAĞI
         if self.cur == 0 and g in (0x01, 0x02):
             if t - last_scroll_time_ms >= SCROLL_COOLDOWN_MS:
                 max_off = max(0, self.system_h - self.H)
@@ -537,11 +608,7 @@ class App:
                 if self.cur == 0: self.system_canvas = None; self.scroll_y = 0
                 changed = True
 
-        elif g == 0x0B:        # DOUBLE CLICK -> tema
-            self.dark = not self.dark
-            self.C = DARK if self.dark else LIGHT
-            self.system_canvas = None
-            changed = True
+        # ÇİFTE TIKLAMA ile tema DEĞİŞTİRMEYİ KALDIRDIK. (0x0B yok)
 
         touch.Gestures = 0
         if g in (0x03,0x04) and changed:
@@ -569,7 +636,6 @@ class App:
                     self.disp.ShowImage(img)
                     last_draw = time.time()
             else:
-                # periyodik redraw (hızlı ama aşırı değil)
                 if time.time() - last_draw > 0.6:
                     if self.cur == 0:
                         self._render_system_canvas()
@@ -578,13 +644,13 @@ class App:
                     last_draw = time.time()
             time.sleep(0.01)
 
-# ---------- Main ----------
+# --- Main ---
 if __name__ == "__main__":
     try:
         App().run()
     except KeyboardInterrupt:
         try:
-            disp = LCD_1inch69.LCD_1inch69(rst=RST, dc=DC, bl=BL, tp_int=TP_RST, tp_rst=TP_RST, bl_freq=100)
+            disp = LCD_1inch69.LCD_1inch69(rst=RST, dc=DC, bl=BL, tp_int=TP_INT, tp_rst=TP_RST, bl_freq=100)
             disp.module_exit()
         except Exception:
             pass
