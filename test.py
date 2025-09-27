@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Waveshare 1.69" (240x280) Touch LCD • Raspberry Pi 5
-# Sistem Paneli • System sayfası ve Temperature sayfası scrollable
-# - Tema geçişi: SADECE sağ üst tek dokunuş
-# - Temp sayfası: Fan AUTO eşiği, durum, RPM, büyük butonlar (AUTO / ON-OFF / − / +)
+# Sistem Paneli • System ve Temperature sayfaları scrollable
+# Tema geçişi: SADECE sağ üst tek dokunuş
+# Temperature: Fan AUTO eşiği, durum, RPM, büyük butonlar (AUTO / ON-OFF / − / + dikey)
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
@@ -232,8 +232,7 @@ class FanIO:
         for cd in self._ls("/sys/class/thermal"):
             if not os.path.basename(cd).startswith("cooling_device"):
                 continue
-            cur = os.path.join(cd, "cur_state")
-            mx  = os.path.join(cd, "max_state")
+            cur = os.path.join(cd, "cur_state"); mx = os.path.join(cd, "max_state")
             if os.path.exists(cur) and os.path.exists(mx):
                 self.cool_cur, self.cool_max = cur, mx
 
@@ -387,13 +386,13 @@ def render_system_canvas(W, H, m, C):
 
     return img, content_h
 
-# ---------- Temperature (scrollable canvas + büyük butonlar) ----------
-def render_temperature_canvas(W, H, m, C, fan:FanIO, auto_mode, auto_thr, manual_pct):
+# ---------- Temperature (scrollable canvas + büyük butonlar; −/+ dikey) ----------
+def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, manual_pct):
     """
     Döner: img, content_h, button_rects (canvas koordinatları)
     """
     y = 0
-    img = Image.new("RGB", (W, max(H+1, 700)), C["BG"])
+    img = Image.new("RGB", (W, max(H+1, 820)), C["BG"])
     d = ImageDraw.Draw(img)
 
     # Başlık
@@ -402,47 +401,62 @@ def render_temperature_canvas(W, H, m, C, fan:FanIO, auto_mode, auto_thr, manual
     y = 70
 
     # Büyük halka ve değer
-    rounded_fill(d, (8,y, W-8, y+180), radius=14, fill=C["SURFACE2"])
+    rounded_fill(d, (8,y, W-8, y+200), radius=14, fill=C["SURFACE2"])
     t_pct = clamp((m.temp-30)*(100.0/60.0),0,100)
-    ring(d, 120, y+90, 70, t_pct, track=C["BARBG"], color=C["ORANGE"], width=16)
-    d.text((120, y+90), f"{m.temp:0.1f}°C", font=F30, fill=C["FG"], anchor="mm")
-    y += 192
+    ring(d, 120, y+100, 78, t_pct, track=C["BARBG"], color=C["ORANGE"], width=16)
+    d.text((120, y+100), f"{m.temp:0.1f}°C", font=F30, fill=C["FG"], anchor="mm")
+    y += 212
 
     # Auto eşik bilgisi
-    rounded_fill(d, (8,y, W-8, y+66), radius=14, fill=C["SURFACE2"])
+    rounded_fill(d, (8,y, W-8, y+72), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Auto", C["LIME"] if auto_mode else C["ORANGE"], (0,0,0))
-    d.text((16, y+38), f"Auto on at: {auto_thr:.0f}°C   (hyst 3°C)", font=F18, fill=(200,205,210))
-    y += 78
+    d.text((16, y+42), f"Auto on at: {auto_thr:.0f}°C   (hyst 3°C)", font=F18, fill=(200,205,210))
+    y += 84
 
     # Fan durumu ve RPM
-    rounded_fill(d, (8,y, W-8, y+70), radius=14, fill=C["SURFACE2"])
+    rounded_fill(d, (8,y, W-8, y+78), radius=14, fill=C["SURFACE2"])
     rpm = fan.read_rpm()
     status = "ON" if fan.state else "OFF"
     pct_show = int(round(fan.percent))
     info = f"Fan: {status}   {pct_show}%"
     if rpm > 0: info += f"   {rpm} RPM"
-    d.text((16, y+22), info, font=F22, fill=C["FG"])
-    y += 82
+    d.text((16, y+26), info, font=F22, fill=C["FG"])
+    y += 90
 
-    # Butonlar: büyük
+    # Butonlar: AUTO ve ON/OFF solda yatay; − ve + sağda DIKEY
     rects = {}
-    bx, by = 12, y
-    bw, bh, gap = 76, 32, 10
 
-    def btn(label, key, bg):
-        nonlocal bx
-        rounded_fill(d, (bx, by, bx+bw, by+bh), radius=10, fill=bg)
-        d.text((bx+bw//2, by+bh//2), label, font=F18, fill=(0,0,0), anchor="mm")
-        rects[key] = (bx, by, bx+bw, by+bh)
-        bx += bw + gap
+    # Sol sıra: iki geniş buton
+    left_y = y
+    bw, bh, gap = 84, 34, 10
+    x = 12
+    rounded_fill(d, (x, left_y, x+bw, left_y+bh), radius=10, fill=C["LIME"] if auto_mode else C["SURFACE"])
+    d.text((x+bw//2, left_y+bh//2), "AUTO", font=F18, fill=(0,0,0), anchor="mm")
+    rects["AUTO"] = (x, left_y, x+bw, left_y+bh)
+    x += bw + gap
+    rounded_fill(d, (x, left_y, x+bw+6, left_y+bh), radius=10, fill=C["AMBER"])
+    d.text((x+(bw+6)//2, left_y+bh//2), "ON/OFF", font=F18, fill=(0,0,0), anchor="mm")
+    rects["TOGGLE"] = (x, left_y, x+bw+6, left_y+bh)
 
-    # AUTO | ON/OFF | − | +
-    bx = 12
-    btn("AUTO",   "AUTO",   C["LIME"] if auto_mode else C["SURFACE"])
-    btn("ON/OFF", "TOGGLE", C["AMBER"])
-    btn("−",      "MINUS",  C["SURFACE"])
-    btn("+",      "PLUS",   C["SURFACE"])
-    y += bh + 16
+    # Sağ sütun: − ve + alt alta, büyük
+    col_x = 240 - 12 - 66  # sağdan içeri 12px, genişlik 66
+    col_w = 66
+    top_y = left_y
+    btn_h = 34
+    gap_v = 12
+
+    # MINUS
+    rounded_fill(d, (col_x, top_y, col_x+col_w, top_y+btn_h), radius=10, fill=C["SURFACE"])
+    d.text((col_x+col_w//2, top_y+btn_h//2), "−", font=F24, fill=(0,0,0), anchor="mm")
+    rects["MINUS"] = (col_x, top_y, col_x+col_w, top_y+btn_h)
+
+    # PLUS (altında)
+    top_y2 = top_y + btn_h + gap_v
+    rounded_fill(d, (col_x, top_y2, col_x+col_w, top_y2+btn_h), radius=10, fill=C["SURFACE"])
+    d.text((col_x+col_w//2, top_y2+btn_h//2), "+", font=F24, fill=(0,0,0), anchor="mm")
+    rects["PLUS"] = (col_x, top_y2, col_x+col_w, top_y2+btn_h)
+
+    y = max(left_y + bh, top_y2 + btn_h) + 16
 
     content_h = max(y+10, H+1)
     if content_h > img.height:
@@ -518,8 +532,7 @@ class App:
         touch.Set_Mode(2)
         touch.GPIO_TP_INT.when_pressed = Int_Callback
 
-        # sayfalar
-        # 0:System (scrollable), 1:Disk&Net, 2:Storage, 3:Temperature (scrollable)
+        # sayfalar: 0 System (scroll), 1 Disk&Net, 2 Storage, 3 Temperature (scroll)
         self.cur = 0
 
         # System scroll
@@ -528,7 +541,7 @@ class App:
         self.sys_scroll_y = 0
         self.sys_scroll_step = 56
 
-        # Temp scroll
+        # Temperature scroll
         self.temp_canvas = None
         self.temp_h = self.H
         self.temp_scroll_y = 0
@@ -540,7 +553,7 @@ class App:
         self.auto_mode = True
         self.auto_thr = 65.0
         self.hyst = 3.0
-        self.manual_pct = 60.0  # elle hız
+        self.manual_pct = 60.0
 
         self.running = True
         threading.Thread(target=self._metrics_loop, daemon=True).start()
@@ -624,6 +637,7 @@ class App:
             if self._tap_in_rect(x, cy, br.get("AUTO")):
                 last_button_time_ms = t
                 self.auto_mode = not self.auto_mode
+                self.temp_canvas = None
                 changed = True
             elif self._tap_in_rect(x, cy, br.get("TOGGLE")):
                 last_button_time_ms = t
@@ -631,22 +645,22 @@ class App:
                     self.auto_mode = False
                     if self.fan.state:
                         self.manual_pct = max(self.manual_pct, 30.0)
+                    self.temp_canvas = None
                     changed = True
             elif self._tap_in_rect(x, cy, br.get("MINUS")):
                 last_button_time_ms = t
                 self.auto_mode = False
                 self.manual_pct = max(0.0, self.manual_pct - 5.0)
                 self.fan.set_percent(self.manual_pct)
+                self.temp_canvas = None
                 changed = True
             elif self._tap_in_rect(x, cy, br.get("PLUS")):
                 last_button_time_ms = t
                 self.auto_mode = False
                 self.manual_pct = min(100.0, self.manual_pct + 5.0)
                 self.fan.set_percent(self.manual_pct)
+                self.temp_canvas = None
                 changed = True
-
-            if changed:
-                self.temp_canvas = None  # buton durumunu yansıt
 
         return changed
 
