@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Waveshare 1.69" (240x280) + CST816S
-# 2-gesture orientation wizard: Swipe RIGHT, then DOWN. Auto-detects SWAP/INVERT.
-# Expands raw range from captured swipes to kill 20x20 corner shrink.
-# Then shows "TOUCHED!" and marks exact touch point. Hold top-left 1s to rerun wizard.
+# Robust orientation wizard: try all 8 combos (swap_xy, invert_x, invert_y) and score them.
+# Rule: RIGHT swipe -> screen Δx>0, |Δy| small ; DOWN swipe -> screen Δy>0, |Δx| small.
+# Then mark exact touch with "TOUCHED!" kept on screen. Hold top-left 1s -> rerun wizard.
 
 import time, json, math, statistics
 from pathlib import Path
@@ -28,24 +28,29 @@ BAD  = (255, 80, 80)
 GRID = (30, 34, 40)
 MARK = (255, 80, 80)
 
-RAW_MIN, RAW_MAX = 0, 4095  # güvenli çit
+RAW_MIN, RAW_MAX = 0, 4095
 
 def draw_grid(d, W, H):
     for gy in range(0, H, 28): d.line((0, gy, W, gy), fill=GRID)
     for gx in range(0, W, 24): d.line((gx, 0, gx, H), fill=GRID)
 
 def default_calib():
-    # bir başlangıç, ama wizard hemen güncelleyecek
     return {"swap_xy": True, "invert_x": True, "invert_y": False,
             "xmin": 0, "xmax": 3840, "ymin": 0, "ymax": 3840}
 
+def clamp_range(a, b):
+    lo = max(RAW_MIN, min(a, b))
+    hi = min(RAW_MAX, max(a, b))
+    if hi - lo < 50:  # aşırı dar ise genişlet
+        mid = (lo + hi) // 2
+        lo = max(RAW_MIN, mid - 600)
+        hi = min(RAW_MAX, mid + 600)
+    return lo, hi
+
 def map_point(rx, ry, cfg, W, H):
     if cfg["swap_xy"]: rx, ry = ry, rx
-    # dinamik clamp
-    xmin = max(RAW_MIN, min(cfg["xmin"], cfg["xmax"]))
-    xmax = min(RAW_MAX, max(cfg["xmin"], cfg["xmax"]))
-    ymin = max(RAW_MIN, min(cfg["ymin"], cfg["ymax"]))
-    ymax = min(RAW_MAX, max(cfg["ymin"], cfg["ymax"]))
+    xmin, xmax = clamp_range(cfg["xmin"], cfg["xmax"])
+    ymin, ymax = clamp_range(cfg["ymin"], cfg["ymax"])
     nx = (rx - xmin) / max(1, (xmax - xmin))
     ny = (ry - ymin) / max(1, (ymax - ymin))
     nx = 0.0 if nx < 0 else 1.0 if nx > 1 else nx
@@ -73,21 +78,20 @@ class Touch:
             d = self.bus.read_i2c_block_data(CST816_ADDR, 0x01, 7)
         except Exception:
             return None
-        fingers = d[1] & 0x0F
-        if fingers == 0: return None
+        if (d[1] & 0x0F) == 0:
+            return None
         rx = ((d[2] & 0x0F) << 8) | d[3]
         ry = ((d[4] & 0x0F) << 8) | d[5]
         return rx, ry
 
-    # ---------------- Orientation Wizard ----------------
+    # ---------- Wizard helpers ----------
     def _collect_swipe(self, lcd, W, H, label):
-        """Kullanıcıdan tek bir kaydırma al: başlangıç ve bitiş ham (rx,ry) ve aralıklar."""
         img = Image.new("RGB",(W,H),BG); d=ImageDraw.Draw(img); draw_grid(d,W,H)
         d.text((8,8), f"Swipe {label}", fill=FG)
         d.text((8,26), "Press, move ~1s, release", fill=FG)
         lcd.ShowImage(img)
 
-        # dokunma başlasın
+        # wait for touch start
         t0 = time.time()
         while time.time()-t0 < 6.0:
             r = self.read_raw()
@@ -95,7 +99,6 @@ class Touch:
             time.sleep(0.01)
         if not r: return None
 
-        # örnek topla
         rx_list, ry_list = [], []
         t1 = time.time()
         while time.time()-t1 < 1.2:
@@ -104,59 +107,73 @@ class Touch:
             rx_list.append(rr[0]); ry_list.append(rr[1])
             time.sleep(0.01)
 
-        if len(rx_list) < 4: return None
-        start = (rx_list[0], ry_list[0])
-        end   = (rx_list[-1], ry_list[-1])
-        # aralıklar
-        xmin, xmax = min(rx_list), max(rx_list)
-        ymin, ymax = min(ry_list), max(ry_list)
-        return {
-            "start": start, "end": end,
-            "dx": end[0]-start[0], "dy": end[1]-start[1],
-            "xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax
+        if len(rx_list) < 5: return None
+        n = len(rx_list)
+        k = max(1, n//5)
+        # medyan başlangıç ve bitiş
+        start = (int(statistics.median(rx_list[:k])), int(statistics.median(ry_list[:k])))
+        end   = (int(statistics.median(rx_list[-k:])), int(statistics.median(ry_list[-k:])))
+        rng = {
+            "xmin": min(rx_list), "xmax": max(rx_list),
+            "ymin": min(ry_list), "ymax": max(ry_list)
         }
+        return {"start": start, "end": end, **rng}
+
+    def _score_combo(self, cfg, W, H, right_swipe, down_swipe):
+        # Map medyan başlangıç-bitiş -> ekran vektörleri
+        sx1, sy1 = map_point(*right_swipe["start"], cfg, W, H)
+        ex1, ey1 = map_point(*right_swipe["end"],   cfg, W, H)
+        v1x, v1y = ex1 - sx1, ey1 - sy1
+
+        sx2, sy2 = map_point(*down_swipe["start"], cfg, W, H)
+        ex2, ey2 = map_point(*down_swipe["end"],   cfg, W, H)
+        v2x, v2y = ex2 - sx2, ey2 - sy2
+
+        # Ceza fonksiyonu:
+        #  - sağ kaydırmada Δx <= 0 ise ağır ceza, |Δy| sapması orta ceza
+        #  - aşağı kaydırmada Δy <= 0 ise ağır ceza, |Δx| sapması orta ceza
+        #  - büyüklük iyi şey: |Δx| ve |Δy| büyükse puanı düşür (yani ödül)
+        NEG = 10000
+        score = 0
+        if v1x <= 0: score += NEG + abs(v1x)*10
+        if v2y <= 0: score += NEG + abs(v2y)*10
+        score += 6*abs(v1y) + 6*abs(v2x)
+        score += 2*(abs(v1x) + abs(v2y))*(-1)  # ödül: esas eksen büyüklüğü
+        # ek: çok büyük açı sapmalarına küçük ceza
+        # hedef v1 ~ (1,0), v2 ~ (0,1)
+        score += 2*abs(v1y) + 2*abs(v2x)
+        return score
 
     def run_wizard(self, lcd, W, H):
-        """SAĞ ve AŞAĞI kaydırma ile swap/invert ve geniş min/max bul."""
-        data_r = self._collect_swipe(lcd, W, H, "RIGHT")
-        if not data_r:
+        r = self._collect_swipe(lcd, W, H, "RIGHT")
+        if not r:
             self._flash(lcd, W, H, "RIGHT failed", BAD); return False
-        time.sleep(0.3)
-        data_d = self._collect_swipe(lcd, W, H, "DOWN")
-        if not data_d:
+        time.sleep(0.2)
+        d = self._collect_swipe(lcd, W, H, "DOWN")
+        if not d:
             self._flash(lcd, W, H, "DOWN failed", BAD); return False
 
-        # Eksen tespiti: RIGHT kaydırmada hangi ham eksen daha çok değişti?
-        swap_xy = abs(data_r["dy"]) > abs(data_r["dx"])
-
-        # Sağ kaydırma için X yönü
-        if swap_xy:
-            # x ekranı ry'dan gelir; DOWN/UP ile aynı eksen
-            invert_x = False if data_r["dy"] > 0 else True
-        else:
-            invert_x = False if data_r["dx"] > 0 else True
-
-        # Aşağı kaydırma için Y yönü (ekran y artınca aşağı iner)
-        if swap_xy:
-            # y ekranı rx'den gelir
-            invert_y = False if data_d["dx"] > 0 else True
-        else:
-            invert_y = False if data_d["dy"] > 0 else True
-
-        # Ham aralık: iki jestte görülen min/max'ları birleştir ve pad ekle
-        rx_min = min(data_r["xmin"], data_d["xmin"])
-        rx_max = max(data_r["xmax"], data_d["xmax"])
-        ry_min = min(data_r["ymin"], data_d["ymin"])
-        ry_max = max(data_r["ymax"], data_d["ymax"])
+        # ham aralıkları genişlet
         pad = 80
-        cfg = {
-            "swap_xy": swap_xy, "invert_x": invert_x, "invert_y": invert_y,
-            "xmin": max(RAW_MIN, rx_min - pad), "xmax": min(RAW_MAX, rx_max + pad),
-            "ymin": max(RAW_MIN, ry_min - pad), "ymax": min(RAW_MAX, ry_max + pad),
-        }
+        xmin = max(RAW_MIN, min(r["xmin"], d["xmin"]) - pad)
+        xmax = min(RAW_MAX, max(r["xmax"], d["xmax"]) + pad)
+        ymin = max(RAW_MIN, min(r["ymin"], d["ymin"]) - pad)
+        ymax = min(RAW_MAX, max(r["ymax"], d["ymax"]) + pad)
+
+        best = None
+        for swap in (False, True):
+            for ix in (False, True):
+                for iy in (False, True):
+                    cfg = {"swap_xy": swap, "invert_x": ix, "invert_y": iy,
+                           "xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax}
+                    s = self._score_combo(cfg, W, H, r, d)
+                    if best is None or s < best[0]:
+                        best = (s, cfg)
+
+        _, cfg = best
         self.calib = cfg
         CALIB_PATH.write_text(json.dumps(cfg))
-        self._flash(lcd, W, H, f"swap={swap_xy} ix={invert_x} iy={invert_y}", GOOD, extra="Saved")
+        self._flash(lcd, W, H, f"swap={cfg['swap_xy']} ix={cfg['invert_x']} iy={cfg['invert_y']}", GOOD, "Saved")
         return True
 
     def _flash(self, lcd, W, H, msg, color, extra=None):
@@ -190,7 +207,6 @@ class App:
         self.lcd.ShowImage(img)
 
     def ensure_orient(self):
-        # Dosya var ama saçma aralık ise yine de sihirbaz
         need = not CALIB_PATH.exists()
         if not need:
             try:
@@ -209,7 +225,6 @@ class App:
         last_idle = time.time()
 
         while True:
-            # kısa aralıklarla birkaç kez yokla
             raw = None
             if self.touch.ok and self.touch.bus is not None:
                 for _ in range(3):
@@ -221,7 +236,7 @@ class App:
                 x,y = map_point(raw[0], raw[1], self.touch.calib, self.W, self.H)
                 self.screen_touched(x,y)
                 touching = True
-                # sol-üst 1sn -> wizard
+                # top-left hold -> wizard
                 if x < 52 and y < 40:
                     if self.hold_tl_t0 is None: self.hold_tl_t0 = time.time()
                     elif time.time()-self.hold_tl_t0 > 1.0:
