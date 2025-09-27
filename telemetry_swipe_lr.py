@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 # Raspberry Pi 5 • 1.69" (240x280) ST7789 • Temiz, toleranslı dashboard
 # - Görüntü sürücüsü: lib/LCD_1inch69.py
 # - Dokunmatik: CST816S @ 0x15 (bus oto: 1,13,14)
