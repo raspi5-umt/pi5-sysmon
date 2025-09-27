@@ -1,12 +1,10 @@
 import time
 from PIL import Image, ImageDraw
-from lib.LCD_1inch69 import LCD_1inch69
-from lib.Touch_1inch69 import Touch_1inch69
+from LCD_1inch69 import LCD_1inch69
+from Touch_1inch69 import Touch_1inch69
 
-# Ekran boyutu
 W, H = 240, 280  
 
-# LCD ve Touch başlat
 lcd = LCD_1inch69()
 lcd.Init()
 touch = Touch_1inch69()
@@ -21,17 +19,18 @@ print("Dokunmatik test başlıyor... (CTRL+C ile çık)")
 
 try:
     while True:
-        raw = touch.read_raw()
-        if raw:
-            rx, ry = raw
-            x, y = scale_map(rx, ry, W, H)
+        if touch.is_pressed():   # dokunma varsa
+            pos = touch.read()   # koordinat oku
+            if pos:
+                rx, ry = pos
+                x, y = scale_map(rx, ry, W, H)
 
-            print(f"RAW=({rx},{ry})  SCALED=({x},{y})")
+                print(f"RAW=({rx},{ry})  SCALED=({x},{y})")
 
-            img = Image.new("RGB", (W, H), "black")
-            d = ImageDraw.Draw(img)
-            d.ellipse((x-3, y-3, x+3, y+3), fill="red")  # Dokunulan yere kırmızı nokta
-            lcd.ShowImage(img)
+                img = Image.new("RGB", (W, H), "black")
+                d = ImageDraw.Draw(img)
+                d.ellipse((x-3, y-3, x+3, y+3), fill="red")
+                lcd.ShowImage(img)
 
         time.sleep(0.05)
 
