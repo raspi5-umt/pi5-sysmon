@@ -1,7 +1,7 @@
 import time
 from PIL import Image, ImageDraw
-from LCD_1inch69 import LCD_1inch69
-from Touch_1inch69 import Touch_1inch69
+from lib.LCD_1inch69 import LCD_1inch69
+from lib.Touch_1inch69 import Touch_1inch69
 
 # Ekran boyutu
 W, H = 240, 280  
