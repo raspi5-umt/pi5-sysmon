@@ -15,16 +15,16 @@ except ImportError:
 CST816_ADDR = 0x15
 I2C_BUS = 1  # gerekirse 13/14 deneyebilirsin
 
-# ---- Ekran yön düzeltmeleri ----
-SWAP_XY  = True   # True yap ve tekrar dene: bazı panellerde X/Y ters gelir
-INVERT_X = True   # True yap ve tekrar dene: X ekseni ters ise
-INVERT_Y = False   # True yap ve tekrar dene: Y ekseni ters ise
+SWAP_XY  = True
+INVERT_X = True
+INVERT_Y = False
 
-# CST816S çoğunlukla 12-bit (0..4095) ham koordinat verir
+RAW_MIN_X = 0
 RAW_MAX_X = 3840
-RAW_MAX_Y = 3840
-RAW_MIN_X = 255
-RAW_MIN_Y = 64
+
+# DİKEY tam ekran için daralt (Y ekran ekseni = RAW X aralığı)
+RAW_MIN_Y = 200
+RAW_MAX_Y = 1200
 
 # ---- Font (isteğe bağlı) ----
 def load_font(sz):
