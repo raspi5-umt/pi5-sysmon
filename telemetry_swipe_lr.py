@@ -387,31 +387,15 @@ class App:
             self.metrics.update()
             time.sleep(0.5)
 
-    def _render(self, r, c):
+   def _render(self, r, c):
     img = Image.new("RGB", (self.W, self.H), self.C["BG"])
     d = ImageDraw.Draw(img)
-    
-    # Grid
+
     for gy in range(0, self.H, 28):
         d.line((0, gy, self.W, gy), fill=self.C["GRID"])
-    
-    # Sağ üst köşe tema ikonu
+
     d.text((self.W-16, 8), "◑", font=F12, fill=self.C["MUTED"], anchor="ra")
-    
-    # Sayfa içeriğini çiz
     PAGES[r][c](img, d, self.metrics, self.C, self.W, self.H)
-
-    # Alt kısımda "sayfa konumu" noktaları
-    cols = len(PAGES[0])
-    rows = len(PAGES)
-    for rr in range(rows):
-        for cc in range(cols):
-            color = self.C["ACC1"] if (rr==r and cc==c) else self.C["MUTED"]
-            d.ellipse(
-                (12 + cc*14, self.H-14-rr*12, 18 + cc*14, self.H-8-rr*12),
-                fill=color
-            )
-
     return img
 
     def _toggle_theme(self):
