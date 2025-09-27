@@ -152,7 +152,7 @@ class Metrics:
 class Touch:
     def __init__(self):
         self.available=False; self.bus=None
-        self.start=None; self.th=24
+        self.start=None; self.th=40  # eşik artırıldı (daha temiz swipe)
         if not SMBUS_OK: return
         for b in CAND_BUSES:
             try:
@@ -172,18 +172,21 @@ class Touch:
 
     def read_gesture(self, W,H):
         pt=self._point(W,H)
-        if not pt: self.start=None; return 0, None
+        if not pt:
+            self.start=None
+            return None
         if self.start is None:
-            self.start=pt; return 0, pt
+            self.start=pt
+            return None
         x0,y0=self.start; x,y=pt
-        dx=x-x0; dy=y-y0
+        dx,dy = x-x0, y-y0
         if abs(dx)<self.th and abs(dy)<self.th:
-            return 0, pt
+            return None
         self.start=None
-        if abs(dx)>=abs(dy):
-            return (1 if dx>0 else -1), pt    # sağ/sol
+        if abs(dx)>abs(dy):
+            return "R" if dx>0 else "L"
         else:
-            return (2 if dy>0 else -2), pt    # aşağı/yukarı
+            return "D" if dy>0 else "U"
 
 # --------- SAYFALAR ----------
 def page_thermal(img,d,m,C,W,H):
@@ -293,16 +296,29 @@ class App:
         self.move_dir=move
         self.anim=0.0
 
-    def _handle_touch(self):
-        code, pt = self.touch.read_gesture(self.W,self.H)
-        if not pt: return
-        x,y = pt
-        if x>self.W-40 and y<40:
-            self._toggle_theme(); time.sleep(0.2); return
-        if code==-1: self._switch("L")
-        elif code==1: self._switch("R")
-        elif code==-2: self._switch("U")
-        elif code==2: self._switch("D")
+        def _handle_touch(self):
+        g = self.touch.read_gesture(self.W,self.H)
+        if not g: 
+            return
+
+        # Sağ üst köşe: tema değiştir
+        pt = self.touch._point(self.W, self.H)
+        if pt:
+            x,y = pt
+            if x > self.W-40 and y < 40:
+                self._toggle_theme()
+                time.sleep(0.2)
+                return
+
+        # Yönler
+        if g == "L":
+            self._switch("L")
+        elif g == "R":
+            self._switch("R")
+        elif g == "U":
+            self._switch("U")
+        elif g == "D":
+            self._switch("D")
 
     def loop(self):
         fps=30; dt=1.0/fps; last=time.time()
