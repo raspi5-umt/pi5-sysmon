@@ -23,8 +23,8 @@ RAW_MIN_X = 0
 RAW_MAX_X = 3840
 
 # DİKEY tam ekran için daralt (Y ekran ekseni = RAW X aralığı)
-RAW_MIN_Y = 200
-RAW_MAX_Y = 1200
+RAW_MIN_Y = 0
+RAW_MAX_Y = 2800
 
 # ---- Font (isteğe bağlı) ----
 def load_font(sz):
