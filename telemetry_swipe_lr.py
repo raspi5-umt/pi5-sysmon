@@ -358,8 +358,8 @@ def page_proc(img,d,m,C,W,H):
         if y>H-10: break
 
 PAGES = [
-    [page_thermal, page_ram, page_cpu],
-    [page_disk,    page_net, page_proc],
+    [page_thermal, page_ram, page_cpu],   # satır 0
+    [page_disk, page_net, page_proc],     # satır 1
 ]
 
 # --------- APP ----------
@@ -388,29 +388,50 @@ class App:
             time.sleep(0.5)
 
     def _render(self, r, c):
-        img=Image.new("RGB",(self.W,self.H), self.C["BG"])
-        d=ImageDraw.Draw(img)
-        for gy in range(0,self.H,28):
-            d.line((0,gy,self.W,gy), fill=self.C["GRID"])
-        d.text((self.W-16,8), "◑", font=F12, fill=self.C["MUTED"], anchor="ra")
-        PAGES[r][c](img,d,self.metrics,self.C,self.W,self.H)
-        return img
+    img = Image.new("RGB", (self.W, self.H), self.C["BG"])
+    d = ImageDraw.Draw(img)
+    
+    # Grid
+    for gy in range(0, self.H, 28):
+        d.line((0, gy, self.W, gy), fill=self.C["GRID"])
+    
+    # Sağ üst köşe tema ikonu
+    d.text((self.W-16, 8), "◑", font=F12, fill=self.C["MUTED"], anchor="ra")
+    
+    # Sayfa içeriğini çiz
+    PAGES[r][c](img, d, self.metrics, self.C, self.W, self.H)
+
+    # Alt kısımda "sayfa konumu" noktaları
+    cols = len(PAGES[0])
+    rows = len(PAGES)
+    for rr in range(rows):
+        for cc in range(cols):
+            color = self.C["ACC1"] if (rr==r and cc==c) else self.C["MUTED"]
+            d.ellipse(
+                (12 + cc*14, self.H-14-rr*12, 18 + cc*14, self.H-8-rr*12),
+                fill=color
+            )
+
+    return img
 
     def _toggle_theme(self):
         self.theme_dark=not self.theme_dark
         self.C = DARK if self.theme_dark else LIGHT
 
     def _switch(self, move):
-        R, Cn = len(PAGES), len(PAGES[0])
-        r, c = self.row, self.col
-        if move=="L": c=(c-1)%Cn
-        elif move=="R": c=(c+1)%Cn
-        elif move=="U": r=(r-1)%R
-        elif move=="D": r=(r+1)%R
-        else: return
-        self.t_row,self.t_col=r,c
-        self.move_dir=move
-        self.anim=0.0
+    R, Cn = len(PAGES), len(PAGES[0])
+    r, c = self.row, self.col
+    if move == "L":   # sola
+        c = (c - 1) % Cn
+    elif move == "R": # sağa
+        c = (c + 1) % Cn
+    elif move == "U": # yukarı
+        r = (r - 1) % R
+    elif move == "D": # aşağı
+        r = (r + 1) % R
+    self.t_row, self.t_col = r, c
+    self.move_dir = move
+    self.anim = 0.0
 
     def _handle_touch(self):
         code, pt = self.touch.read_gesture(self.W,self.H)
