@@ -386,18 +386,23 @@ class App:
         while True:
             self.metrics.update()
             time.sleep(0.5)
-
-   def _render(self, r, c):
+            
+    def _render(self, r, c):
     img = Image.new("RGB", (self.W, self.H), self.C["BG"])
     d = ImageDraw.Draw(img)
 
+    # Grid çizgileri
     for gy in range(0, self.H, 28):
         d.line((0, gy, self.W, gy), fill=self.C["GRID"])
 
+    # Sağ üst köşede tema ikonu
     d.text((self.W-16, 8), "◑", font=F12, fill=self.C["MUTED"], anchor="ra")
-    PAGES[r][c](img, d, self.metrics, self.C, self.W, self.H)
-    return img
 
+    # Sayfanın asıl içeriğini çiz
+    PAGES[r][c](img, d, self.metrics, self.C, self.W, self.H)
+
+    return img
+    
     def _toggle_theme(self):
         self.theme_dark=not self.theme_dark
         self.C = DARK if self.theme_dark else LIGHT
