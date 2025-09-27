@@ -3,7 +3,8 @@
 # Waveshare 1.69" (240x280) Touch LCD • Raspberry Pi 5
 # Sistem Paneli • System ve Temperature sayfaları scrollable
 # Tema geçişi: SADECE sağ üst tek dokunuş
-# Temperature: Fan AUTO eşiği, durum, RPM, büyük tek-satır butonlar (AUTO | ON/OFF | − | +), her basışta ±%5
+# Temperature: Fan AUTO eşiği, durum, RPM, iki satırlı büyük butonlar (AUTO | ON/OFF) ve (− | +)
+# RGB: WS2812 bulunursa 12 renk düğmesi (rpi_ws281x ile), bulunmazsa hiç gösterilmez.
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
@@ -270,6 +271,40 @@ class FanIO:
     def toggle(self):
         return self.set_percent(0 if self.state else 100)
 
+# ---------- RGB Controller (opsiyonel) ----------
+class RGBController:
+    """
+    WS2812/NeoPixel LED varsa basit renk ayarı.
+    - Varsayılan pin: GPIO18 (PCM/PWM) -> env ICE_RGB_PIN ile değiştirilebilir
+    - LED sayısı: env ICE_RGB_COUNT (varsayılan 1)
+    Yoksa available=False ve UI'de renk düğmeleri gösterilmez.
+    """
+    def __init__(self):
+        self.available = False
+        self._strip = None
+        pin = int(os.getenv("ICE_RGB_PIN", "18"))
+        count = int(os.getenv("ICE_RGB_COUNT", "1"))
+        try:
+            from rpi_ws281x import PixelStrip, Color
+            self.Color = Color
+            # 800kHz, DMA10, brightness 255
+            self._strip = PixelStrip(count, pin, 800000, 10, False, 255, 0, ws=None)
+            self._strip.begin()
+            self.available = True
+        except Exception:
+            self.available = False
+
+    def set_color(self, r, g, b):
+        if not self.available or self._strip is None: return False
+        try:
+            c = self.Color(int(r), int(g), int(b))
+            for i in range(self._strip.numPixels()):
+                self._strip.setPixelColor(i, c)
+            self._strip.show()
+            return True
+        except Exception:
+            return False
+
 # ---------- SYSTEM (scrollable canvas) ----------
 def render_system_canvas(W, H, m, C):
     y = 0
@@ -386,13 +421,14 @@ def render_system_canvas(W, H, m, C):
 
     return img, content_h
 
-# ---------- Temperature (scrollable canvas + tek satır büyük butonlar) ----------
-def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, manual_pct):
+# ---------- Temperature (scrollable canvas; iki satır büyük buton; opsiyonel renk paleti) ----------
+def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, manual_pct, rgb: 'RGBController'):
     """
-    Döner: img, content_h, button_rects (canvas koordinatları)
+    Döner: img, content_h, rects (canvas koordinatları)
+    rects: {"AUTO":..., "TOGGLE":..., "MINUS":..., "PLUS":..., "COLOR_0"...}
     """
     y = 0
-    img = Image.new("RGB", (W, max(H+1, 760)), C["BG"])
+    img = Image.new("RGB", (W, max(H+1, 900)), C["BG"])
     d = ImageDraw.Draw(img)
 
     # Başlık
@@ -423,44 +459,54 @@ def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, man
     d.text((16, y+26), info, font=F22, fill=C["FG"])
     y += 90
 
-    # Tek satır büyük butonlar: AUTO | ON/OFF | − | +
     rects = {}
 
-    inner_left = 8
-    inner_right = W - 8
+    # --- Satır 1: AUTO | ON/OFF (yarım-yan yarım, yüksek)
     gap = 6
-    total_inner_w = inner_right - inner_left  # 224 px
+    left = 8; right = W - 8
+    row_w = right - left
+    bw = (row_w - gap) // 2
+    bh = 44  # yüksekliği artırıldı
+    x = left; y1 = y
+    rounded_fill(d, (x, y1, x+bw, y1+bh), radius=12, fill=C["LIME"] if auto_mode else C["SURFACE"])
+    d.text((x+bw//2, y1+bh//2), "AUTO", font=F22, fill=(0,0,0), anchor="mm")
+    rects["AUTO"] = (x, y1, x+bw, y1+bh)
+    x2 = x + bw + gap
+    rounded_fill(d, (x2, y1, x2+bw, y1+bh), radius=12, fill=C["AMBER"])
+    d.text((x2+bw//2, y1+bh//2), "ON/OFF", font=F22, fill=(0,0,0), anchor="mm")
+    rects["TOGGLE"] = (x2, y1, x2+bw, y1+bh)
+    y = y1 + bh + 10
 
-    # Buton oranları: AUTO:1.0, TOGGLE:1.4, MINUS:1.6, PLUS:1.6 -> ± daha büyük
-    weights = [1.0, 1.4, 1.6, 1.6]
-    sum_w = sum(weights)
-    total_gaps = 3 * gap
-    avail = total_inner_w - total_gaps
-    # Minimum genişlik güvenliği
-    minw = 40
-    widths = [max(minw, int(avail * w / sum_w)) for w in weights]
+    # --- Satır 2: − | + (yarım-yan yarım, yüksek)
+    bh2 = 46
+    x = left; y2 = y
+    rounded_fill(d, (x, y2, x+bw, y2+bh2), radius=12, fill=C["SURFACE"])
+    d.text((x+bw//2, y2+bh2//2), "−", font=F28, fill=(0,0,0), anchor="mm")
+    rects["MINUS"] = (x, y2, x+bw, y2+bh2)
+    x2 = x + bw + gap
+    rounded_fill(d, (x2, y2, x2+bw, y2+bh2), radius=12, fill=C["SURFACE"])
+    d.text((x2+bw//2, y2+bh2//2), "+", font=F28, fill=(0,0,0), anchor="mm")
+    rects["PLUS"] = (x2, y2, x2+bw, y2+bh2)
+    y = y2 + bh2 + 14
 
-    # Genişlikleri tam sığdırmak için son butonda telafi
-    delta = avail - sum(widths)
-    widths[-1] += delta
-
-    bh = 40  # yükseklik büyük
-    x = inner_left
-    yb = y
-
-    def draw_btn(w, key, label, bg, fg=(0,0,0)):
-        nonlocal x
-        rounded_fill(d, (x, yb, x+w, yb+bh), radius=12, fill=bg)
-        d.text((x+w//2, yb+bh//2), label, font=F20, fill=fg, anchor="mm")
-        rects[key] = (x, yb, x+w, yb+bh)
-        x += w + gap
-
-    draw_btn(widths[0], "AUTO",   "AUTO",   C["LIME"] if auto_mode else C["SURFACE"])
-    draw_btn(widths[1], "TOGGLE", "ON/OFF", C["AMBER"])
-    draw_btn(widths[2], "MINUS",  "−",      C["SURFACE"])
-    draw_btn(widths[3], "PLUS",   "+",      C["SURFACE"])
-
-    y = yb + bh + 16
+    # --- RGB Palet (sadece rgb.available True ise göster)
+    if getattr(rgb, "available", False):
+        # 12 sabit renk
+        palette = [
+            (255, 0, 0), (255, 80, 0), (255, 160, 0),
+            (255, 255, 0), (160, 255, 0), (0, 255, 0),
+            (0, 255, 160), (0, 255, 255), (0, 160, 255),
+            (0, 80, 255), (0, 0, 255), (160, 0, 255)
+        ]
+        cols = 6
+        sw = (row_w - (cols-1)*gap) // cols
+        sh = 24
+        for i, (r,g,b) in enumerate(palette):
+            cx = left + (i % cols) * (sw + gap)
+            cy = y + (i // cols) * (sh + gap)
+            rounded_fill(d, (cx, cy, cx+sw, cy+sh), radius=6, fill=(r,g,b))
+            rects[f"COLOR_{i}"] = (cx, cy, cx+sw, cy+sh)
+        y += (2 * (sh + gap)) + 6
 
     content_h = max(y+10, H+1)
     if content_h > img.height:
@@ -470,7 +516,7 @@ def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, man
 
     return img, content_h, rects
 
-# ---------- Diğer kısa sayfalar ----------
+# ---------- Basit sayfalar ----------
 def page_disk_net(d, m, C, W, H):
     d.text((12,10), "DISK & NET", font=F28, fill=C["FG"])
     d.text((12,56), f"DISK {m.disk:0.0f}%", font=F24, fill=C["FG"])
@@ -550,14 +596,17 @@ class App:
         self.temp_h = self.H
         self.temp_scroll_y = 0
         self.temp_scroll_step = 56
-        self.temp_btn_rects = {}
+        self.temp_rects = {}
 
         # Fan
         self.fan = FanIO()
         self.auto_mode = True
         self.auto_thr = 65.0
         self.hyst = 3.0
-        self.manual_pct = 60.0  # elle ± butonları bu değeri değiştirir
+        self.manual_pct = 60.0
+
+        # RGB
+        self.rgb = RGBController()
 
         self.running = True
         threading.Thread(target=self._metrics_loop, daemon=True).start()
@@ -584,8 +633,8 @@ class App:
 
     def _render_temperature(self):
         img, h, rects = render_temperature_canvas(self.W, self.H, self.m, self.C,
-                                                  self.fan, self.auto_mode, self.auto_thr, self.manual_pct)
-        self.temp_canvas, self.temp_h, self.temp_btn_rects = img, h, rects
+                                                  self.fan, self.auto_mode, self.auto_thr, self.manual_pct, self.rgb)
+        self.temp_canvas, self.temp_h, self.temp_rects = img, h, rects
         max_off = max(0, self.temp_h - self.H)
         self.temp_scroll_y = max(0, min(self.temp_scroll_y, max_off))
 
@@ -634,15 +683,17 @@ class App:
             self.temp_canvas = None
             changed = True
 
-        # Temperature butonları: canvas koordinatına çevrilmiş tıklama
-        if self.cur == 3 and (t - last_button_time_ms) > TAP_COOLDOWN_MS and self.temp_btn_rects:
+        # Temperature: butonlar
+        if self.cur == 3 and (t - last_button_time_ms) > TAP_COOLDOWN_MS and self.temp_rects:
             cy = y + self.temp_scroll_y  # ekran y -> canvas y
-            br = self.temp_btn_rects
+            br = self.temp_rects
+
             if self._tap_in_rect(x, cy, br.get("AUTO")):
                 last_button_time_ms = t
                 self.auto_mode = not self.auto_mode
                 self.temp_canvas = None
                 changed = True
+
             elif self._tap_in_rect(x, cy, br.get("TOGGLE")):
                 last_button_time_ms = t
                 if self.fan.toggle():
@@ -651,6 +702,7 @@ class App:
                         self.manual_pct = max(self.manual_pct, 30.0)
                     self.temp_canvas = None
                     changed = True
+
             elif self._tap_in_rect(x, cy, br.get("MINUS")):
                 last_button_time_ms = t
                 self.auto_mode = False
@@ -658,6 +710,7 @@ class App:
                 self.fan.set_percent(self.manual_pct)
                 self.temp_canvas = None
                 changed = True
+
             elif self._tap_in_rect(x, cy, br.get("PLUS")):
                 last_button_time_ms = t
                 self.auto_mode = False
@@ -665,6 +718,23 @@ class App:
                 self.fan.set_percent(self.manual_pct)
                 self.temp_canvas = None
                 changed = True
+
+            else:
+                # RGB renk kutuları
+                if getattr(self.rgb, "available", False):
+                    for i in range(12):
+                        rname = f"COLOR_{i}"
+                        if self._tap_in_rect(x, cy, br.get(rname)):
+                            last_button_time_ms = t
+                            palette = [
+                                (255, 0, 0), (255, 80, 0), (255, 160, 0),
+                                (255, 255, 0), (160, 255, 0), (0, 255, 0),
+                                (0, 255, 160), (0, 255, 255), (0, 160, 255),
+                                (0, 80, 255), (0, 0, 255), (160, 0, 255)
+                            ]
+                            r,g,b = palette[i]
+                            self.rgb.set_color(r,g,b)
+                            # görsel değişmediği için yeniden oluşturma gerekmiyor
 
         return changed
 
