@@ -18,9 +18,9 @@ def get_temp() -> float:
 while True:
     temp = get_temp()
 
-    if temp < 40:
+    if temp < 33:
         set_fan_speed(0)      # 40°C altı: kapalı
-    elif temp < 60:
+    elif temp < 36:
         set_fan_speed(128)    # 40–60°C arası: yarı hız
     else:
         set_fan_speed(255)    # 60°C üstü: tam hız
