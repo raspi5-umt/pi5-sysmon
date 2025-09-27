@@ -3,7 +3,7 @@
 # Waveshare 1.69" (240x280) Touch LCD • Raspberry Pi 5
 # Sistem Paneli • System ve Temperature sayfaları scrollable
 # Tema geçişi: SADECE sağ üst tek dokunuş
-# Temperature: Fan AUTO eşiği, durum, RPM, büyük butonlar (AUTO / ON-OFF / − / + dikey)
+# Temperature: Fan AUTO eşiği, durum, RPM, büyük tek-satır butonlar (AUTO | ON/OFF | − | +), her basışta ±%5
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
@@ -386,13 +386,13 @@ def render_system_canvas(W, H, m, C):
 
     return img, content_h
 
-# ---------- Temperature (scrollable canvas + büyük butonlar; −/+ dikey) ----------
+# ---------- Temperature (scrollable canvas + tek satır büyük butonlar) ----------
 def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, manual_pct):
     """
     Döner: img, content_h, button_rects (canvas koordinatları)
     """
     y = 0
-    img = Image.new("RGB", (W, max(H+1, 820)), C["BG"])
+    img = Image.new("RGB", (W, max(H+1, 760)), C["BG"])
     d = ImageDraw.Draw(img)
 
     # Başlık
@@ -408,10 +408,10 @@ def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, man
     y += 212
 
     # Auto eşik bilgisi
-    rounded_fill(d, (8,y, W-8, y+72), radius=14, fill=C["SURFACE2"])
+    rounded_fill(d, (8,y, W-8, y+74), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Auto", C["LIME"] if auto_mode else C["ORANGE"], (0,0,0))
-    d.text((16, y+42), f"Auto on at: {auto_thr:.0f}°C   (hyst 3°C)", font=F18, fill=(200,205,210))
-    y += 84
+    d.text((16, y+44), f"Auto on at: {auto_thr:.0f}°C   (hyst 3°C)   Manual: {int(manual_pct)}%", font=F18, fill=(200,205,210))
+    y += 86
 
     # Fan durumu ve RPM
     rounded_fill(d, (8,y, W-8, y+78), radius=14, fill=C["SURFACE2"])
@@ -423,40 +423,44 @@ def render_temperature_canvas(W, H, m, C, fan: 'FanIO', auto_mode, auto_thr, man
     d.text((16, y+26), info, font=F22, fill=C["FG"])
     y += 90
 
-    # Butonlar: AUTO ve ON/OFF solda yatay; − ve + sağda DIKEY
+    # Tek satır büyük butonlar: AUTO | ON/OFF | − | +
     rects = {}
 
-    # Sol sıra: iki geniş buton
-    left_y = y
-    bw, bh, gap = 84, 34, 10
-    x = 12
-    rounded_fill(d, (x, left_y, x+bw, left_y+bh), radius=10, fill=C["LIME"] if auto_mode else C["SURFACE"])
-    d.text((x+bw//2, left_y+bh//2), "AUTO", font=F18, fill=(0,0,0), anchor="mm")
-    rects["AUTO"] = (x, left_y, x+bw, left_y+bh)
-    x += bw + gap
-    rounded_fill(d, (x, left_y, x+bw+6, left_y+bh), radius=10, fill=C["AMBER"])
-    d.text((x+(bw+6)//2, left_y+bh//2), "ON/OFF", font=F18, fill=(0,0,0), anchor="mm")
-    rects["TOGGLE"] = (x, left_y, x+bw+6, left_y+bh)
+    inner_left = 8
+    inner_right = W - 8
+    gap = 6
+    total_inner_w = inner_right - inner_left  # 224 px
 
-    # Sağ sütun: − ve + alt alta, büyük
-    col_x = 240 - 12 - 66  # sağdan içeri 12px, genişlik 66
-    col_w = 66
-    top_y = left_y
-    btn_h = 34
-    gap_v = 12
+    # Buton oranları: AUTO:1.0, TOGGLE:1.4, MINUS:1.6, PLUS:1.6 -> ± daha büyük
+    weights = [1.0, 1.4, 1.6, 1.6]
+    sum_w = sum(weights)
+    total_gaps = 3 * gap
+    avail = total_inner_w - total_gaps
+    # Minimum genişlik güvenliği
+    minw = 40
+    widths = [max(minw, int(avail * w / sum_w)) for w in weights]
 
-    # MINUS
-    rounded_fill(d, (col_x, top_y, col_x+col_w, top_y+btn_h), radius=10, fill=C["SURFACE"])
-    d.text((col_x+col_w//2, top_y+btn_h//2), "−", font=F24, fill=(0,0,0), anchor="mm")
-    rects["MINUS"] = (col_x, top_y, col_x+col_w, top_y+btn_h)
+    # Genişlikleri tam sığdırmak için son butonda telafi
+    delta = avail - sum(widths)
+    widths[-1] += delta
 
-    # PLUS (altında)
-    top_y2 = top_y + btn_h + gap_v
-    rounded_fill(d, (col_x, top_y2, col_x+col_w, top_y2+btn_h), radius=10, fill=C["SURFACE"])
-    d.text((col_x+col_w//2, top_y2+btn_h//2), "+", font=F24, fill=(0,0,0), anchor="mm")
-    rects["PLUS"] = (col_x, top_y2, col_x+col_w, top_y2+btn_h)
+    bh = 40  # yükseklik büyük
+    x = inner_left
+    yb = y
 
-    y = max(left_y + bh, top_y2 + btn_h) + 16
+    def draw_btn(w, key, label, bg, fg=(0,0,0)):
+        nonlocal x
+        rounded_fill(d, (x, yb, x+w, yb+bh), radius=12, fill=bg)
+        d.text((x+w//2, yb+bh//2), label, font=F20, fill=fg, anchor="mm")
+        rects[key] = (x, yb, x+w, yb+bh)
+        x += w + gap
+
+    draw_btn(widths[0], "AUTO",   "AUTO",   C["LIME"] if auto_mode else C["SURFACE"])
+    draw_btn(widths[1], "TOGGLE", "ON/OFF", C["AMBER"])
+    draw_btn(widths[2], "MINUS",  "−",      C["SURFACE"])
+    draw_btn(widths[3], "PLUS",   "+",      C["SURFACE"])
+
+    y = yb + bh + 16
 
     content_h = max(y+10, H+1)
     if content_h > img.height:
@@ -553,7 +557,7 @@ class App:
         self.auto_mode = True
         self.auto_thr = 65.0
         self.hyst = 3.0
-        self.manual_pct = 60.0
+        self.manual_pct = 60.0  # elle ± butonları bu değeri değiştirir
 
         self.running = True
         threading.Thread(target=self._metrics_loop, daemon=True).start()
