@@ -16,14 +16,14 @@ CST816_ADDR = 0x15
 I2C_BUS = 1  # gerekirse 13/14 deneyebilirsin
 
 SWAP_XY  = True
-INVERT_X = False
+INVERT_X = True
 INVERT_Y = False
 
 # Başlangıçta kaba tahmin; otomatik öğrenme bunları güncelleyecek:
-RAW_MIN_X = 64
-RAW_MAX_X = 2560
-RAW_MIN_Y = 264
-RAW_MAX_Y = 3840
+RAW_MIN_X = 255
+RAW_MAX_X = 2840
+RAW_MIN_Y = 64
+RAW_MAX_Y = 32560
 
 # ---- Font (isteğe bağlı) ----
 def load_font(sz):
