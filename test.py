@@ -22,8 +22,8 @@ INVERT_Y = False   # True yap ve tekrar dene: Y ekseni ters ise
 
 # CST816S çoğunlukla 12-bit (0..4095) ham koordinat verir
 RAW_MAX_X = 3840
-RAW_MAX_Y = 64
-RAW_MIN_X = 0
+RAW_MAX_Y = 3840
+RAW_MIN_X = 64
 RAW_MIN_Y = 64
 
 # ---- Font (isteğe bağlı) ----
