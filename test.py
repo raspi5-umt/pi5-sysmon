@@ -33,13 +33,22 @@ RAW_MIN_Y, RAW_MAX_Y = 0, 3840
 
 # --- EKRAN KURULUMU ---
 disp = st7789.ST7789(
-    rotation=ROTATION,
-    port=PORT, cs=CS, dc=DC_PIN, backlight=BL_PIN, rst=RST_PIN,
-    width=WIDTH, height=HEIGHT, offset_left=OFFSET_LEFT, offset_top=OFFSET_TOP
+    rotation=0,   # 90 yerine 0 veya 180 dene
+    port=0,
+    cs=0,
+    dc=25,
+    backlight=13,
+    rst=27,
+    width=240,
+    height=280,
+    offset_left=0,
+    offset_top=0
 )
-disp.init()
-img = Image.new("RGB", (WIDTH, HEIGHT), (0,0,0))
+img = Image.new("RGB", (240, 280), (0,0,0))
 draw = ImageDraw.Draw(img)
+
+draw.text((10, 10), "Hello Pi5", fill=(255,255,255))
+disp.display(img)
 
 def cls(c=(0,0,0)):
     draw.rectangle((0,0,WIDTH,HEIGHT), fill=c)
