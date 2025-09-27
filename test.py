@@ -162,7 +162,7 @@ def page_summary(d, m, C, W, H):
     ring(d, 120,170,48, t_pct, C); d.text((120,170), f"{m.temp:0.1f}°C", font=F14, fill=C["FG"], anchor="mm"); d.text((120,196),"TEMP", font=F12, fill=C["ACC2"], anchor="mm")
 
 def page_disk_net(d, m, C, W, H):
-    d.text((12,10), "DISK & NET", font=F22, fill=C["FG"])
+    d.text((12,10), "DISK & NET", font=F18, fill=C["FG"])
     d.text((12,50), f"DISK {m.disk:0.0f}%", font=F18, fill=C["FG"]); bar(d, 12,70, W-24,14, m.disk, C)
     d.text((12,100), f"UP {m.up:0.0f} KB/s", font=F16, fill=C["ACC1"])
     d.text((12,132), f"DN {m.dn:0.0f} KB/s", font=F16, fill=C["ACC2"])
