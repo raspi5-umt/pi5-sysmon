@@ -15,16 +15,15 @@ except ImportError:
 CST816_ADDR = 0x15
 I2C_BUS = 1  # gerekirse 13/14 deneyebilirsin
 
-SWAP_XY  = True
+WAP_XY  = True
 INVERT_X = True
 INVERT_Y = False
 
+# Başlangıçta kaba tahmin; otomatik öğrenme bunları güncelleyecek:
 RAW_MIN_X = 0
 RAW_MAX_X = 3840
-
-# DİKEY tam ekran için daralt (Y ekran ekseni = RAW X aralığı)
-RAW_MIN_Y = 64
-RAW_MAX_Y = 1900
+RAW_MIN_Y = 0
+RAW_MAX_Y = 3840
 
 # ---- Font (isteğe bağlı) ----
 def load_font(sz):
