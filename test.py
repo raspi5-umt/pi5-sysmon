@@ -22,7 +22,7 @@ INVERT_Y = False   # True yap ve tekrar dene: Y ekseni ters ise
 
 # CST816S çoğunlukla 12-bit (0..4095) ham koordinat verir
 RAW_MAX_X = 4095
-RAW_MAX_Y = 8000
+RAW_MAX_Y = 4095
 
 # ---- Font (isteğe bağlı) ----
 def load_font(sz):
