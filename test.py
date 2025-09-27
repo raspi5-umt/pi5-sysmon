@@ -18,11 +18,11 @@ I2C_BUS = 1  # gerekirse 13/14 deneyebilirsin
 # ---- Ekran yön düzeltmeleri ----
 SWAP_XY  = True   # True yap ve tekrar dene: bazı panellerde X/Y ters gelir
 INVERT_X = False   # True yap ve tekrar dene: X ekseni ters ise
-INVERT_Y = False   # True yap ve tekrar dene: Y ekseni ters ise
+INVERT_Y = True   # True yap ve tekrar dene: Y ekseni ters ise
 
 # CST816S çoğunlukla 12-bit (0..4095) ham koordinat verir
-RAW_MAX_X = 4095
-RAW_MAX_Y = 4095
+RAW_MAX_X = 255
+RAW_MAX_Y = 255
 
 # ---- Font (isteğe bağlı) ----
 def load_font(sz):
