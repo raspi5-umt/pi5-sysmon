@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Waveshare 1.69" (240x280) Touch LCD • Raspberry Pi 5
-# Sistem Paneli (CPU • RAM • Depolama • Ağ • Sıcaklık)
-# Dokunmatik: Waveshare Touch_1inch69 akışı
-# Debounce: jestler tek sayfa atlatsın diye cooldown
-#
-# Bu sürümde SYSTEM sayfası Material tarzında yeniden tasarlandı:
-# - Üstte rounded "app bar": başlık + büyük saat/tarih
-# - Altta 3 "card": CPU, RAM, TEMP (haleli halka grafik, chip etiketleri)
-# - Modern tipografi ve yumuşak gölgeler
+# Smartwatch tarzı Sistem Paneli
+# - Dokunmatik: Waveshare Touch_1inch69 (senin çalışan örnekle aynı akış)
+# - Sol/sağ: sayfalar arası geçiş
+# - Yukarı/aşağı: SYSTEM sayfasında dikey scroll
+# - Debounce/cooldown var, sayfa numarası gösterilmez
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
@@ -31,30 +28,35 @@ Flag = 0           # callback tetikleyici
 touch = None       # Touch_1inch69 instance
 
 # ---------- Debounce / Cooldown ----------
-SWIPE_COOLDOWN_MS = 600
-TAP_COOLDOWN_MS   = 250
+SWIPE_COOLDOWN_MS  = 600   # sol/sağ (sayfa) için
+SCROLL_COOLDOWN_MS = 220   # yukarı/aşağı (dikey kaydırma) için
+TAP_COOLDOWN_MS    = 250
+
 last_gesture_time_ms = 0
 last_gesture_code    = 0
+last_scroll_time_ms  = 0
 last_tap_time_ms     = 0
 
 # ---------- Log ----------
 logging.basicConfig(level=logging.INFO)
 
-# ---------- Tema ----------
+# ---------- Tema (canlı renkli) ----------
 DARK = dict(
-    BG=(6,10,14), FG=(235,235,240),
-    ACC1=(123,178,255), ACC2=(255,132,188),
-    OK=(92,210,125), WARN=(255,175,60), BAD=(255,95,95),
-    GRID=(22,28,34), BARBG=(22,26,32),
-    SURFACE=(14,18,24), SURFACE2=(18,22,28),
+    BG=(10,12,18), FG=(236,238,244),
+    ACC1=(120,185,255), ACC2=(255,135,195), ACC3=(140,255,200),
+    OK=(90,210,130), WARN=(255,185,70), BAD=(255,95,95),
+    GRID=(24,30,38), BARBG=(24,28,34),
+    SURFACE=(18,22,30), SURFACE2=(22,26,34),
+    CHIP_DARK=(36,42,56),
     SHADOW=(0,0,0)
 )
 LIGHT = dict(
-    BG=(242,244,248), FG=(22,24,28),
-    ACC1=(36,99,240), ACC2=(205,70,135),
+    BG=(244,246,252), FG=(22,24,28),
+    ACC1=(40,105,245), ACC2=(210,60,130), ACC3=(40,175,125),
     OK=(44,175,100), WARN=(230,140,0), BAD=(210,40,40),
     GRID=(210,214,220), BARBG=(210,214,220),
     SURFACE=(255,255,255), SURFACE2=(248,249,251),
+    CHIP_DARK=(230,232,238),
     SHADOW=(0,0,0)
 )
 
@@ -69,7 +71,7 @@ def load_font(sz):
     from PIL import ImageFont as IF
     return IF.load_default()
 
-F10, F12, F14, F16, F18, F20, F22, F26, F28 = (load_font(s) for s in (10,12,14,16,18,20,22,26,28))
+F10,F12,F14,F16,F18,F20,F22,F24,F26,F28,F32 = (load_font(s) for s in (10,12,14,16,18,20,22,24,26,28,32))
 
 def clamp(v, lo, hi):
     try:
@@ -83,49 +85,69 @@ def now_ms():
     return int(time.time()*1000)
 
 # ---------- Basit çizim yardımcıları ----------
-def shadow_rect(img, box, radius, blur=6, alpha=90, C=None):
-    # CPU'yu yakmadan sahte gölge: 2 katman yarı saydam dolgular
-    x1,y1,x2,y2 = box
-    d = ImageDraw.Draw(img)
-    if C is None: C=(0,0,0)
-    for i in range(blur//2):
-        a = int(alpha * (1.0 - i/(blur//2+1)))
-        d.rounded_rectangle((x1+i, y1+i, x2+i, y2+i), radius=radius, fill=(C[0],C[1],C[2],))
-    # üstte gerçek yüzeyi çizecek fonksiyon çağrılır
-
 def rounded_fill(d, box, radius, fill):
     d.rounded_rectangle(box, radius=radius, fill=fill)
 
-def chip(d, x, y, text, C, accent=True):
-    # küçük etiket
+def chip(d, x, y, text, C, accent=None):
     padx, pady = 6, 3
-    size = d.textlength(text, font=F12)
-    w = int(size) + 2*padx
+    w = int(d.textlength(text, font=F12)) + 2*padx
     h = 18
-    col = C["ACC1"] if accent else C["SURFACE2"]
-    txt = (0,0,0) if not accent else (255,255,255)
-    d.rounded_rectangle((x, y, x+w, y+h), radius=9, fill=col)
-    d.text((x+padx, y+2), text, font=F12, fill=txt)
+    if accent is None:
+        bg = C["CHIP_DARK"]
+        fg = C["FG"]
+    else:
+        bg = C[accent]
+        fg = (255,255,255)
+    d.rounded_rectangle((x,y,x+w,y+h), radius=9, fill=bg)
+    d.text((x+padx, y+2), text, font=F12, fill=fg)
     return w, h
 
-def ring(d, cx, cy, r, pct, C, width=10, back_alpha=70):
-    pct = clamp(pct,0,100)/100.0
-    # arka halo
-    d.ellipse((cx-r-6, cy-r-6, cx+r+6, cy+r+6), outline=(0,0,0), width=0, fill=(C["ACC1"][0], C["ACC1"][1], C["ACC1"][2],))
-    # track
-    d.arc((cx-r, cy-r, cx+r, cy+r), start=135, end=405, width=width, fill=C["BARBG"])
-    # progress
-    col = C["OK"] if pct < 0.7 else (C["WARN"] if pct < 0.85 else C["BAD"])
-    d.arc((cx-r, cy-r, cx+r, cy+r), start=135, end=135+int(270*pct), width=width, fill=col)
+def ring_color_for(pct, C):
+    pct = clamp(pct, 0, 100)
+    if pct < 70:   return C["ACC3"]
+    if pct < 85:   return C["WARN"]
+    return C["BAD"]
 
-def bar(d, x,y,w,h,pct,C):
+def ring(d, cx, cy, r, pct, C, width=12, track=None, color=None):
+    pct = clamp(pct,0,100)/100.0
+    if track is None: track = C["BARBG"]
+    if color is None: color = ring_color_for(100*pct, C)
+    # track
+    d.arc((cx-r, cy-r, cx+r, cy+r), start=135, end=405, width=width, fill=track)
+    # progress
+    d.arc((cx-r, cy-r, cx+r, cy+r), start=135, end=135+int(270*pct), width=width, fill=color)
+
+def bar(d, x,y,w,h,pct,C,color=None):
     pct = clamp(pct,0,100)
     d.rounded_rectangle([x,y,x+w,y+h], radius=h//2, fill=C["BARBG"])
-    d.rounded_rectangle([x,y,x+int(w*pct/100.0),y+h], radius=h//2, fill=C["ACC1"])
+    d.rounded_rectangle([x,y,x+int(w*pct/100.0),y+h], radius=h//2, fill=color or C["ACC1"])
 
 def grid(d, W, H, C):
     for gy in range(0, H, 28):
         d.line((0, gy, W, gy), fill=C["GRID"])
+
+def sparkline(d, x,y,w,h,series,color,C):
+    # arka grid çizgisi
+    d.rectangle((x,y,x+w,y+h), outline=C["GRID"], width=1)
+    vals=[]
+    for v in list(series):
+        try:
+            vv=float(v)
+            if math.isfinite(vv): vals.append(vv)
+        except: pass
+    if len(vals) < 2:
+        py = y + h//2
+        d.line((x,py,x+w,py), fill=color, width=2)
+        return
+    mn, mx = min(vals), max(vals)
+    rng = max(1e-6, mx-mn)
+    prev=None
+    for i,v in enumerate(vals):
+        t=(v-mn)/rng
+        px = x + int(i*(w-1)/max(1,len(vals)-1))
+        py = y + h - 1 - int(t*(h-2))
+        if prev: d.line((prev[0],prev[1],px,py), fill=color, width=2)
+        prev=(px,py)
 
 # ---------- Metrikler ----------
 try:
@@ -189,56 +211,151 @@ class Metrics:
         self.hcpu.append(self.cpu); self.hram.append(self.ram); self.htmp.append(self.temp)
         self.hup.append(self.up);   self.hdn.append(self.dn)
 
-# ---------- Sayfalar ----------
-def page_system_material(d, m, C, W, H):
-    # App bar (üst): yumuşak yüzey, büyük saat
-    # Gölge
-    rounded_fill(d, (8,6, W-8, 66), radius=14, fill=C["SURFACE"])
-    # Başlık
-    d.text((20,16), "System", font=F20, fill=C["FG"])
-    # Saat & tarih
+# ---------- SYSTEM (scrollable) ----------
+def render_system_scrollable(W, H, m, C):
+    """
+    Uzun bir dashboard imajı üretir; dönen: (img, content_height)
+    Scroll App içinde image'dan pencere kesilerek yapılır.
+    """
+    content_h = 560  # ihtiyaca göre uzat
+    img = Image.new("RGB", (W, content_h), C["BG"])
+    d = ImageDraw.Draw(img)
+
+    # App bar
+    rounded_fill(d, (8,6, W-8, 70), radius=14, fill=C["SURFACE"])
+    d.text((18, 16), "System", font=F32, fill=C["FG"])
+    # Sağ blok: saat sağa hizalı, tarih altta soldan başlasın
     hhmm = time.strftime("%H:%M")
     day  = time.strftime("%a %d %b")
-    d.text((W-20, 14), hhmm, font=F28, fill=C["ACC1"], anchor="ra")
-    d.text((W-20, 40), day,  font=F12, fill=(150,150,160), anchor="ra")
+    d.text((W-12, 14), hhmm, font=F28, fill=C["ACC1"], anchor="ra")
+    d.text((W-92, 44), day,  font=F12, fill=(160,170,190))  # soldan başlasın
 
-    # Altta 3 kart: CPU, RAM, TEMP
-    # Kart boyutları
-    pad = 10
-    cw  = (W - pad*3) // 2  # iki sütun
-    ch  = 84
-    x1, y1 = 8, 78
-    x2, y2 = x1+cw+pad, 78
-    x3, y3 = 8, y1+ch+pad
+    y = 80
+    pad_x = 10
 
-    # CPU Card
-    rounded_fill(d, (x1, y1, x1+cw, y1+ch), radius=12, fill=C["SURFACE2"])
-    chip(d, x1+8, y1+8, "CPU", C, accent=True)
-    ring(d, x1+cw-30, y1+ch//2+4, 20, m.cpu, C, width=8)
-    d.text((x1+14, y1+40), f"{m.cpu:0.0f}%", font=F20, fill=C["FG"])
-    bar(d, x1+12, y1+ch-18, cw-24, 10, m.cpu, C)
-
-    # RAM Card
-    rounded_fill(d, (x2, y2, x2+cw, y2+ch), radius=12, fill=C["SURFACE2"])
-    chip(d, x2+8, y2+8, "RAM", C, accent=True)
-    ring(d, x2+cw-30, y2+ch//2+4, 20, m.ram, C, width=8)
-    d.text((x2+14, y2+40), f"{m.ram:0.0f}%", font=F20, fill=C["FG"])
-    bar(d, x2+12, y2+ch-18, cw-24, 10, m.ram, C)
-
-    # TEMP Card (geniş tek kart)
-    rounded_fill(d, (x3, y3, x3+cw*2+pad, y3+ch), radius=12, fill=C["SURFACE2"])
-    chip(d, x3+8, y3+8, "TEMP", C, accent=False)
+    # SECTION: Temperature (renkli halka + chip)
+    rounded_fill(d, (8,y, W-8, y+94), radius=12, fill=C["SURFACE2"])
+    chip(d, 16, y+10, "Temperature", C, accent="ACC2")
     t_pct = clamp((m.temp-30)*(100.0/60.0), 0, 100)
-    ring(d, x3+52, y3+ch//2+4, 24, t_pct, C, width=10)
-    d.text((x3+92, y3+34), f"{m.temp:0.1f}°C", font=F22, fill=C["FG"])
-    # küçük bilgi çubuğu
-    bar(d, x3+92, y3+ch-18, (cw*2+pad)-92-12, 10, t_pct, C)
+    ring(d, 52, y+54, 26, t_pct, C, width=12, color=C["ACC2"])
+    d.text((85, y+26), f"{m.temp:0.1f}°C", font=F22, fill=C["FG"])
+    bar(d, 85, y+62, W-85-16, 10, t_pct, C, color=C["ACC2"])
+    y += 102
 
+    # SECTION: CPU (halka + sparkline)
+    rounded_fill(d, (8,y, W-8, y+120), radius=12, fill=C["SURFACE2"])
+    chip(d, 16, y+10, "CPU", C, accent="ACC1")
+    ring(d, 52, y+62, 26, m.cpu, C, width=12, color=C["ACC1"])
+    d.text((85, y+30), f"{m.cpu:0.0f}%", font=F22, fill=C["FG"])
+    sparkline(d, 85, y+58, W-85-16, 44, m.hcpu, C["ACC1"], C)
+    y += 128
+
+    # SECTION: RAM
+    rounded_fill(d, (8,y, W-8, y+76), radius=12, fill=C["SURFACE2"])
+    chip(d, 16, y+10, "RAM", C, accent="ACC3")
+    d.text((16, y+36), f"{m.ram:0.0f}%", font=F22, fill=C["FG"])
+    bar(d, 86, y+40, W-86-16, 12, m.ram, C, color=C["ACC3"])
+    y += 84
+
+    # SECTION: Storage
+    rounded_fill(d, (8,y, W-8, y+110), radius=12, fill=C["SURFACE2"])
+    chip(d, 16, y+10, "Storage", C, accent=None)
+    yy = y+36
+    try:
+        import psutil as ps
+        count = 0
+        for p in ps.disk_partitions():
+            if count >= 3: break
+            try:
+                u = ps.disk_usage(p.mountpoint).percent
+                d.text((16, yy), p.mountpoint, font=F14, fill=C["FG"])
+                bar(d, 86, yy+2, W-86-16, 10, u, C, color=C["ACC1"])
+                d.text((W-18, yy), f"{u:0.0f}%", font=F12, fill=(170,180,195), anchor="ra")
+                yy += 28; count += 1
+            except Exception:
+                pass
+    except Exception:
+        u = m.disk
+        d.text((16, yy), "/", font=F14, fill=C["FG"])
+        bar(d, 86, yy+2, W-86-16, 10, u, C, color=C["ACC1"])
+        d.text((W-18, yy), f"{u:0.0f}%", font=F12, fill=(170,180,195), anchor="ra")
+    y += 118
+
+    # SECTION: Network
+    rounded_fill(d, (8,y, W-8, y+86), radius=12, fill=C["SURFACE2"])
+    chip(d, 16, y+10, "Network", C, accent=None)
+    d.text((16, y+36), f"Up {m.up:0.0f} KB/s", font=F16, fill=C["ACC1"])
+    d.text((16, y+58), f"Dn {m.dn:0.0f} KB/s", font=F16, fill=C["ACC2"])
+    y += 94
+
+    # SECTION: System info (chips ve satırlar)
+    rounded_fill(d, (8,y, W-8, y+120), radius=12, fill=C["SURFACE2"])
+    chip(d, 16, y+10, "System Info", C, accent=None)
+    # uptime
+    try:
+        boot = psutil.boot_time() if psutil else time.time()-1
+        upt = time.time()-boot
+    except Exception:
+        upt = 0
+    dds, rr = divmod(int(upt), 86400); hhs, rr = divmod(rr, 3600); mms, _ = divmod(rr, 60)
+    # ip and cpu freq
+    try:
+        ip = subprocess.check_output(["hostname","-I"]).decode().strip().split()[0]
+    except Exception:
+        ip = "0.0.0.0"
+    try:
+        arm = subprocess.check_output(["vcgencmd","measure_clock","arm"]).decode().split("=")[1]
+        arm = int(arm)/1_000_000
+    except Exception:
+        try:
+            cf = psutil.cpu_freq(); arm = cf.current if cf else 0
+        except Exception:
+            arm = 0
+    # loadavg
+    try:
+        la1,la5,la15 = os.getloadavg()
+    except Exception:
+        la1=la5=la15=0.0
+    # yaz
+    d.text((16, y+38), f"Uptime  {dds}g {hhs}s {mms}d", font=F14, fill=C["FG"])
+    d.text((16, y+58), f"IP      {ip}", font=F14, fill=C["FG"])
+    d.text((16, y+78), f"CPU Hz  {arm:0.0f} MHz", font=F14, fill=C["FG"])
+    d.text((16, y+98), f"Load    {la1:.2f} {la5:.2f} {la15:.2f}", font=F14, fill=C["FG"])
+    y += 128
+
+    # SECTION: Top processes (ilk 3)
+    rounded_fill(d, (8,y, W-8, y+110), radius=12, fill=C["SURFACE2"])
+    chip(d, 16, y+10, "Top Processes", C, accent=None)
+    yy = y+36
+    try:
+        procs=[]
+        if psutil:
+            for p in psutil.process_iter(attrs=["pid","name","cpu_percent","memory_percent"]):
+                try: procs.append(p.info)
+                except Exception: pass
+            procs.sort(key=lambda x: x.get("cpu_percent",0.0), reverse=True)
+            for row in procs[:3]:
+                name=str(row.get("name",""))[:12]
+                cpu = clamp(row.get("cpu_percent",0.0),0,100)
+                mem = clamp(row.get("memory_percent",0.0),0,100)
+                d.text((16,yy), name, font=F14, fill=C["FG"])
+                d.text((W-18,yy), f"{cpu:0.0f}% CPU  {mem:0.0f}% MEM", font=F12, fill=(170,180,195), anchor="ra")
+                yy+=24
+        else:
+            d.text((16,yy), "psutil yok", font=F14, fill=C["FG"])
+    except Exception:
+        pass
+    y += 118
+
+    # İçerik yüksekliği fiilen y
+    return img, max(y+8, content_h)
+
+# ---------- Diğer sayfalar (şimdilik eski yapı) ----------
 def page_disk_net(d, m, C, W, H):
     d.text((12,10), "DISK & NET", font=F22, fill=C["FG"])
     d.text((12,50), f"DISK {m.disk:0.0f}%", font=F18, fill=C["FG"])
     d.rounded_rectangle([12,70,W-12,86], radius=8, fill=C["SURFACE2"])
-    bar(d, 14,72, W-28, 12, m.disk, C)
+    bar(d, 14,72, W-28, 12, m.disk, C, color=C["ACC1"])
     d.text((12,104), f"UP {m.up:0.0f} KB/s", font=F16, fill=C["ACC1"])
     d.text((12,132), f"DN {m.dn:0.0f} KB/s", font=F16, fill=C["ACC2"])
 
@@ -252,7 +369,7 @@ def page_storage(d, m, C, W, H):
                 u = ps.disk_usage(p.mountpoint)
                 d.text((12,y), f"{p.mountpoint} {u.percent:0.0f}%", font=F16, fill=C["FG"])
                 d.rounded_rectangle([90,y+2,W-12,y+16], radius=7, fill=C["SURFACE2"])
-                bar(d, 92, y+4, W-104, 10, u.percent, C)
+                bar(d, 92, y+4, W-104, 10, u.percent, C, color=C["ACC3"])
                 y+=32
                 if y > H-30: break
             except Exception:
@@ -260,18 +377,14 @@ def page_storage(d, m, C, W, H):
     except Exception:
         d.text((12,y), f"/ {m.disk:0.0f}%", font=F16, fill=C["FG"])
         d.rounded_rectangle([90,y+2,W-12,y+16], radius=7, fill=C["SURFACE2"])
-        bar(d, 92, y+4, W-104, 10, m.disk, C)
+        bar(d, 92, y+4, W-104, 10, m.disk, C, color=C["ACC3"])
 
 def page_temp(d, m, C, W, H):
     d.text((12,10), "TEMPERATURE", font=F22, fill=C["FG"])
     t_pct = clamp((m.temp-30)*(100.0/60.0),0,100)
-    # büyük tek halka
-    ring(d, 120,120,64, t_pct, C, width=14)
+    ring(d, 120,120,64, t_pct, C, width=14, color=C["ACC2"])
     d.text((120,120), f"{m.temp:0.1f}°C", font=F22, fill=C["FG"], anchor="mm")
     d.text((120,200), "CPU sıcaklık", font=F14, fill=C["FG"], anchor="mm")
-
-PAGES = [page_system_material, page_disk_net, page_storage, page_temp]
-PAGE_TITLES = ["SYSTEM", "DISK&NET", "STORAGE", "TEMP"]
 
 # ---------- Gesture callback ----------
 def Int_Callback(btn):
@@ -298,7 +411,7 @@ class App:
         self.disp.clear()
         try: self.disp.bl_DutyCycle(90)
         except Exception: pass
-        self.W, self.H = self.disp.width, self.disp.height
+        self.W, self.H = self.disp.width, self.disp.height  # 240x280
 
         # Tema/Metrik
         self.dark = True
@@ -314,7 +427,14 @@ class App:
         touch.Set_Mode(2)
         touch.GPIO_TP_INT.when_pressed = Int_Callback
 
+        # Sayfa ve scroll
         self.cur = 0
+        self.system_canvas = None
+        self.system_h = self.H
+        self.scroll_y = 0
+        self.scroll_step = 48  # her yukarı/aşağı jestinde kayacak miktar
+
+        # Thread
         self.running = True
         threading.Thread(target=self._metrics_loop, daemon=True).start()
 
@@ -323,20 +443,31 @@ class App:
             self.m.update()
             time.sleep(0.5)
 
+    def _render_system_canvas(self):
+        self.system_canvas, self.system_h = render_system_scrollable(self.W, self.H, self.m, self.C)
+        # scroll clamp
+        max_off = max(0, self.system_h - self.H)
+        if self.scroll_y > max_off: self.scroll_y = max_off
+        if self.scroll_y < 0:       self.scroll_y = 0
+
     def _render_page(self):
-        img = Image.new("RGB", (self.W, self.H), self.C["BG"])
-        d = ImageDraw.Draw(img)
-        # SYSTEM sayfasında grid yok; sade malzeme görünümü için
-        if self.cur != 0:
-            grid(d, self.W, self.H, self.C)
-        # başlık (SYSTEM özelinde üst bar zaten başlığı içeriyor)
-        if self.cur != 0:
-            d.text((12, 10), PAGE_TITLES[self.cur], font=F22, fill=self.C["FG"])
-        # içerik
-        PAGES[self.cur](d, self.m, self.C, self.W, self.H)
-        # footer
-        d.text((self.W-12, self.H-8), f"{self.cur+1}/{len(PAGES)}", font=F12, fill=(150,150,150), anchor="rd")
-        return img
+        if self.cur == 0:
+            # uzun SYSTEM sayfasından pencere kes
+            if self.system_canvas is None:
+                self._render_system_canvas()
+            view = self.system_canvas.crop((0, self.scroll_y, self.W, self.scroll_y + self.H))
+            return view
+        else:
+            img = Image.new("RGB", (self.W, self.H), self.C["BG"])
+            d = ImageDraw.Draw(img)
+            d.text((12, 10), ["SYSTEM","DISK&NET","STORAGE","TEMP"][self.cur], font=F22, fill=self.C["FG"])
+            if self.cur == 1:
+                page_disk_net(d, self.m, self.C, self.W, self.H)
+            elif self.cur == 2:
+                page_storage(d, self.m, self.C, self.W, self.H)
+            elif self.cur == 3:
+                page_temp(d, self.m, self.C, self.W, self.H)
+            return img
 
     def _maybe_toggle_theme_on_tap(self):
         global last_tap_time_ms
@@ -350,45 +481,69 @@ class App:
                     last_tap_time_ms = t
                     self.dark = not self.dark
                     self.C = DARK if self.dark else LIGHT
+                    # canvasi yeni temayla yeniden çiz
+                    self.system_canvas = None
         except Exception:
             pass
 
     def _handle_gesture(self):
-        global last_gesture_time_ms, last_gesture_code
+        global last_gesture_time_ms, last_gesture_code, last_scroll_time_ms
         g = getattr(touch, "Gestures", 0)
         if not g:
             self._maybe_toggle_theme_on_tap()
             return False
 
         t = now_ms()
-        if g == last_gesture_code and (t - last_gesture_time_ms) < SWIPE_COOLDOWN_MS:
+
+        # Aynı jest üst üste gelirse ve cooldown dolmadıysa görmezden gel
+        if g == last_gesture_code and (t - last_gesture_time_ms) < SWIPE_COOLDOWN_MS and g in (0x03,0x04):
             touch.Gestures = 0
             return False
 
         changed = False
-        if g == 0x03:        # LEFT
-            if (t - last_gesture_time_ms) >= SWIPE_COOLDOWN_MS:
-                self.cur = (self.cur - 1) % len(PAGES)
-                changed = True
-        elif g == 0x04:      # RIGHT
-            if (t - last_gesture_time_ms) >= SWIPE_COOLDOWN_MS:
-                self.cur = (self.cur + 1) % len(PAGES)
-                changed = True
-        elif g == 0x0B:      # DOUBLE CLICK -> tema
-            if (t - last_gesture_time_ms) >= TAP_COOLDOWN_MS:
-                self.dark = not self.dark
-                self.C = DARK if self.dark else LIGHT
+
+        # Yukarı/Aşağı sadece SYSTEM sayfasında scroll
+        if self.cur == 0 and g in (0x01, 0x02):
+            if t - last_scroll_time_ms >= SCROLL_COOLDOWN_MS:
+                max_off = max(0, self.system_h - self.H)
+                if g == 0x01:   # DOWN -> içerikte aşağı (scroll down)
+                    self.scroll_y = min(max_off, self.scroll_y + self.scroll_step)
+                elif g == 0x02: # UP   -> içerikte yukarı (scroll up)
+                    self.scroll_y = max(0, self.scroll_y - self.scroll_step)
+                last_scroll_time_ms = t
                 changed = True
 
+        elif g == 0x03:        # LEFT  -> önceki sayfa
+            if (t - last_gesture_time_ms) >= SWIPE_COOLDOWN_MS:
+                self.cur = (self.cur - 1) % 4
+                # SYSTEM'e girince canvası tazele
+                if self.cur == 0: self.system_canvas = None; self.scroll_y = 0
+                changed = True
+
+        elif g == 0x04:        # RIGHT -> sonraki sayfa
+            if (t - last_gesture_time_ms) >= SWIPE_COOLDOWN_MS:
+                self.cur = (self.cur + 1) % 4
+                if self.cur == 0: self.system_canvas = None; self.scroll_y = 0
+                changed = True
+
+        elif g == 0x0B:        # DOUBLE CLICK -> tema
+            self.dark = not self.dark
+            self.C = DARK if self.dark else LIGHT
+            self.system_canvas = None
+            changed = True
+
         touch.Gestures = 0
-        if changed:
+        if changed and g in (0x03,0x04):
             last_gesture_time_ms = t
             last_gesture_code = g
-        else:
+        elif g in (0x03,0x04):
             last_gesture_code = g
+
         return changed
 
     def run(self):
+        # ilk çizim
+        self._render_system_canvas()
         img = self._render_page()
         self.disp.ShowImage(img)
         last_draw = time.time()
@@ -398,11 +553,17 @@ class App:
             if Flag == 1:
                 Flag = 0
                 if self._handle_gesture():
+                    if self.cur == 0 and self.system_canvas is None:
+                        self._render_system_canvas()
                     img = self._render_page()
                     self.disp.ShowImage(img)
                     last_draw = time.time()
             else:
-                if time.time() - last_draw > 0.5:
+                # periyodik redraw (metrikler değişsin)
+                if time.time() - last_draw > 0.6:
+                    if self.cur == 0:
+                        # SYSTEM sayfasında metrikler tazelendiğinde uzun canvası güncelle
+                        self._render_system_canvas()
                     img = self._render_page()
                     self.disp.ShowImage(img)
                     last_draw = time.time()
