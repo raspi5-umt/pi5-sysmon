@@ -163,9 +163,6 @@ def page_summary(d, m, C, W, H):
 
 def page_disk_net(d, m, C, W, H):
     d.text((12,10), "DISK & NET", font=F18, fill=C["FG"])
-    d.text((12,50), f"DISK {m.disk:0.0f}%", font=F18, fill=C["FG"]); bar(d, 12,70, W-24,14, m.disk, C)
-    d.text((12,100), f"UP {m.up:0.0f} KB/s", font=F16, fill=C["ACC1"])
-    d.text((12,132), f"DN {m.dn:0.0f} KB/s", font=F16, fill=C["ACC2"])
 
 def page_storage(d, m, C, W, H):
     d.text((12,10), "STORAGE", font=F22, fill=C["FG"])
