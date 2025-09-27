@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Waveshare 1.69" (240x280) Touch LCD • Raspberry Pi 5
-# Smartwatch tarzı Sistem Paneli (renkli, büyük puntolar)
-# - Dokunmatik: Waveshare Touch_1inch69 akışı
-# - Sol/sağ: sayfalar arası geçiş
-# - Yukarı/aşağı: SYSTEM sayfasında dikey scroll (TERCİHİN DOĞRULTUSUNDA TERS ÇEVRİLDİ)
-# - Fazla renk: mavi/pembe yok. Teal, Turuncu, Mor, Limon, Kehribar var.
+# Smartwatch tarzı Sistem Paneli (renkli, büyük puntolar, iyileştirmeler)
+# - Dokunmatik: Waveshare Touch_1inch69 akışı (senin çalışan örnekle aynı)
+# - Sol/sağ: sayfalar (debounce'lu)
+# - Yukarı/aşağı (TERS): System sayfasında dikey scroll (senin tercihine göre)
+# - Tipografi ve boşluklar büyütüldü, mavi/pembe yok
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
 from PIL import Image, ImageDraw, ImageFont
 
-# Waveshare sürücüleri
 sys.path.append("..")
 from lib import LCD_1inch69, Touch_1inch69
 
@@ -23,13 +22,13 @@ TP_INT = 4
 TP_RST = 17
 
 # ---------- Dokunmatik durumu ----------
-Mode = 2           # 0: gesture test, 1: point move, 2: gesture + point
-Flag = 0           # callback tetikleyici
-touch = None       # Touch_1inch69 instance
+Mode = 2
+Flag = 0
+touch = None
 
 # ---------- Debounce / Cooldown ----------
-SWIPE_COOLDOWN_MS  = 600   # sol/sağ (sayfa)
-SCROLL_COOLDOWN_MS = 220   # yukarı/aşağı (scroll)
+SWIPE_COOLDOWN_MS  = 600
+SCROLL_COOLDOWN_MS = 100   # hızlandırıldı
 TAP_COOLDOWN_MS    = 250
 
 last_gesture_time_ms = 0
@@ -37,7 +36,6 @@ last_gesture_code    = 0
 last_scroll_time_ms  = 0
 last_tap_time_ms     = 0
 
-# ---------- Log ----------
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Tema (mavi/pembe yok) ----------
@@ -71,8 +69,8 @@ def load_font(sz):
     from PIL import ImageFont as IF
     return IF.load_default()
 
-# Büyük puntolar
-F12,F14,F16,F18,F20,F22,F24,F26,F28,F32,F36 = (load_font(s) for s in (12,14,16,18,20,22,24,26,28,32,36))
+# Büyük puntolar (başlık hariç metinler iri)
+F12,F14,F16,F18,F20,F22,F24,F26,F28,F30,F32,F36 = (load_font(s) for s in (12,14,16,18,20,22,24,26,28,30,32,36))
 
 def clamp(v, lo, hi):
     try:
@@ -85,16 +83,16 @@ def clamp(v, lo, hi):
 def now_ms():
     return int(time.time()*1000)
 
-# ---------- Basit çizim yardımcıları ----------
+# ---------- Çizim yardımcıları ----------
 def rounded_fill(d, box, radius, fill):
     d.rounded_rectangle(box, radius=radius, fill=fill)
 
 def chip(d, x, y, text, bg, fg):
     padx, pady = 7, 4
-    w = int(d.textlength(text, font=F16)) + 2*padx
-    h = 22
+    w = int(d.textlength(text, font=F18)) + 2*padx
+    h = 24
     d.rounded_rectangle((x,y,x+w,y+h), radius=10, fill=bg)
-    d.text((x+padx, y+2), text, font=F16, fill=fg)
+    d.text((x+padx, y+2), text, font=F18, fill=fg)
     return w, h
 
 def ring(d, cx, cy, r, pct, track, color, width=14):
@@ -138,6 +136,8 @@ except Exception:
 class Metrics:
     def __init__(self, hist_len=90):
         self.cpu=self.ram=self.disk=self.temp=0.0
+        self.mem_total=0; self.mem_used=0
+        self.disk_total=0; self.disk_used=0
         self.up=self.dn=0.0
         self.hcpu=deque(maxlen=hist_len)
         self.hram=deque(maxlen=hist_len)
@@ -156,28 +156,61 @@ class Metrics:
             except Exception:
                 return 0.0
 
-    def update(self):
+    def _mem_totals(self):
         if psutil:
-            try:
-                self.cpu = clamp(psutil.cpu_percent(interval=None), 0, 100)
-                self.ram = clamp(psutil.virtual_memory().percent, 0, 100)
-                self.disk = clamp(psutil.disk_usage("/").percent, 0, 100)
-            except Exception:
-                pass
+            vm = psutil.virtual_memory()
+            self.mem_total = int(vm.total)
+            self.mem_used  = int(vm.total - vm.available)
+            self.ram       = clamp(vm.percent, 0, 100)
         else:
             try:
-                la1 = os.getloadavg()[0]
-                self.cpu = clamp(la1*25.0, 0, 100)
-                self.ram = 0.0
-                st = os.statvfs("/")
-                used = (st.f_blocks - st.f_bfree) * st.f_frsize
-                total = st.f_blocks * st.f_frsize
-                self.disk = clamp(100.0 * used / max(1,total), 0, 100)
+                meminfo = {}
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        k,v,*_ = line.split()
+                        meminfo[k.rstrip(":")] = int(v)*1024
+                total = meminfo.get("MemTotal",0)
+                free  = meminfo.get("MemAvailable",0)
+                used  = max(0,total-free)
+                self.mem_total = total; self.mem_used = used
+                self.ram = 100.0*used/max(1,total)
             except Exception:
                 pass
 
+    def _disk_totals(self):
+        # Root üzerinden toplam/used; istersen tüm mount'ları da toplayabilirdik
+        try:
+            if psutil:
+                u = psutil.disk_usage("/")
+                self.disk       = clamp(u.percent, 0, 100)
+                self.disk_total = int(u.total); self.disk_used = int(u.used)
+            else:
+                st = os.statvfs("/")
+                total = st.f_blocks*st.f_frsize
+                free  = st.f_bavail*st.f_frsize
+                used  = total-free
+                self.disk_total = int(total); self.disk_used = int(used)
+                self.disk = 100.0*used/max(1,total)
+        except Exception:
+            pass
+
+    def update(self):
+        # CPU
+        if psutil:
+            try: self.cpu = clamp(psutil.cpu_percent(interval=None), 0, 100)
+            except Exception: pass
+        else:
+            try: self.cpu = clamp(os.getloadavg()[0]*25.0, 0, 100)
+            except Exception: pass
+
+        # RAM ve Disk detayları
+        self._mem_totals()
+        self._disk_totals()
+
+        # Sıcaklık
         self.temp = clamp(self._temp(), 0, 120)
 
+        # Ağ
         if psutil:
             try:
                 now = psutil.net_io_counters()
@@ -188,82 +221,71 @@ class Metrics:
             except Exception:
                 pass
 
+        # history
         self.hcpu.append(self.cpu); self.hram.append(self.ram); self.htmp.append(self.temp)
         self.hup.append(self.up);   self.hdn.append(self.dn)
 
-# ---------- SYSTEM (scrollable, geniş tipografi, çok renk) ----------
+# ---------- SYSTEM (scrollable) ----------
+def bytes_gb(b): return b/1024/1024/1024
+
 def render_system_scrollable(W, H, m, C):
     y = 0
     content_h_min = H + 1
     img = Image.new("RGB", (W, max(content_h_min, 900)), C["BG"])
     d = ImageDraw.Draw(img)
 
-    # App bar
+    # App bar (System başlığı küçültüldü)
     rounded_fill(d, (8,6, W-8, 78), radius=14, fill=C["SURFACE"])
-    d.text((18, 16), "System", font=F36, fill=C["FG"])
+    d.text((18, 20), "System", font=F32, fill=C["FG"])  # daha küçük
     hhmm = time.strftime("%H:%M")
     day  = time.strftime("%a %d %b")
-    d.text((W-12, 14), hhmm, font=F32, fill=C["TEAL"], anchor="ra")
-    d.text((W-100, 48), day,  font=F16, fill=(200,205,210))
+    d.text((W-12, 16), hhmm, font=F30, fill=C["TEAL"], anchor="ra")
+    d.text((W-98, 48), day,  font=F16, fill=(200,205,210))
     y = 90
 
-    # Temperature
-    rounded_fill(d, (8,y, W-8, y+110), radius=14, fill=C["SURFACE2"])
+    # Temperature (etiket ile derece arasında boşluk artırıldı)
+    rounded_fill(d, (8,y, W-8, y+116), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Temperature", C["ORANGE"], (0,0,0))
     t_pct = clamp((m.temp-30)*(100.0/60.0), 0, 100)
-    ring(d, 58, y+62, 28, t_pct, track=C["BARBG"], color=C["ORANGE"], width=14)
-    d.text((96, y+28), f"{m.temp:0.1f}°C", font=F28, fill=C["FG"])
-    bar(d, 96, y+70, W-96-16, 12, t_pct, color=C["ORANGE"], track=C["BARBG"])
-    y += 122
+    ring(d, 58, y+68, 30, t_pct, track=C["BARBG"], color=C["ORANGE"], width=14)
+    d.text((100, y+36), f"{m.temp:0.1f}°C", font=F30, fill=C["FG"])  # daha aşağıda
+    bar(d, 100, y+76, W-100-16, 12, t_pct, color=C["ORANGE"], track=C["BARBG"])
+    y += 128
 
     # CPU
     rounded_fill(d, (8,y, W-8, y+128), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "CPU", C["VIOLET"], (255,255,255))
-    ring(d, 58, y+70, 28, m.cpu, track=C["BARBG"], color=C["VIOLET"], width=14)
-    d.text((96, y+36), f"{m.cpu:0.0f}%", font=F28, fill=C["FG"])
-    sparkline(d, 96, y+68, W-96-16, 48, m.hcpu, C["VIOLET"], C["GRID"])
+    ring(d, 58, y+70, 30, m.cpu, track=C["BARBG"], color=C["VIOLET"], width=14)
+    d.text((100, y+36), f"{m.cpu:0.0f}%", font=F30, fill=C["FG"])
+    sparkline(d, 100, y+70, W-100-16, 46, m.hcpu, C["VIOLET"], C["GRID"])
     y += 140
 
-    # RAM
-    rounded_fill(d, (8,y, W-8, y+94), radius=14, fill=C["SURFACE2"])
+    # RAM (Used / Total göster)
+    rounded_fill(d, (8,y, W-8, y+110), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "RAM", C["TEAL"], (0,0,0))
-    d.text((16, y+44), f"{m.ram:0.0f}%", font=F28, fill=C["FG"])
-    bar(d, 110, y+48, W-110-16, 14, m.ram, color=C["TEAL"], track=C["BARBG"])
-    y += 106
+    used_gb  = bytes_gb(m.mem_used)
+    total_gb = bytes_gb(m.mem_total)
+    d.text((16, y+44), f"{m.ram:0.0f}%  ({used_gb:.1f} / {total_gb:.1f} GB)", font=F24, fill=C["FG"])
+    bar(d, 16, y+78, W-16-16, 14, m.ram, color=C["TEAL"], track=C["BARBG"])
+    y += 122
 
-    # Storage
-    rounded_fill(d, (8,y, W-8, y+128), radius=14, fill=C["SURFACE2"])
+    # Storage (toplam/kullanılan bar + metin)
+    rounded_fill(d, (8,y, W-8, y+118), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Storage", C["AMBER"], (0,0,0))
-    yy = y+44
-    try:
-        import psutil as ps
-        count = 0
-        for p in ps.disk_partitions():
-            if count >= 3: break
-            try:
-                u = ps.disk_usage(p.mountpoint).percent
-                d.text((16, yy), p.mountpoint, font=F18, fill=C["FG"])
-                bar(d, 110, yy+2, W-110-16, 12, u, color=C["LIME"] if count%2==0 else C["ORANGE"], track=C["BARBG"])
-                d.text((W-18, yy-2), f"{u:0.0f}%", font=F16, fill=(200,205,210), anchor="ra")
-                yy += 30; count += 1
-            except Exception:
-                pass
-    except Exception:
-        u = m.disk
-        d.text((16, yy), "/", font=F18, fill=C["FG"])
-        bar(d, 110, yy+2, W-110-16, 12, u, color=C["LIME"], track=C["BARBG"])
-        d.text((W-18, yy-2), f"{u:0.0f}%", font=F16, fill=(200,205,210), anchor="ra")
-    y += 140
+    du = (bytes_gb(m.disk_used), bytes_gb(m.disk_total))
+    d.text((16, y+44), f"Used {du[0]:.1f} / Total {du[1]:.1f} GB", font=F24, fill=C["FG"])
+    bar(d, 16, y+78, W-16-16, 14, m.disk, color=C["LIME"], track=C["BARBG"])
+    y += 130
 
     # Network
-    rounded_fill(d, (8,y, W-8, y+98), radius=14, fill=C["SURFACE2"])
+    rounded_fill(d, (8,y, W-8, y+100), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Network", C["TEAL"], (0,0,0))
-    d.text((16, y+46), f"Up {m.up:0.0f} KB/s", font=F22, fill=C["TEAL"])
-    d.text((16, y+70), f"Dn {m.dn:0.0f} KB/s", font=F22, fill=C["ORANGE"])
-    y += 110
+    d.text((16, y+48), f"Up {m.up:0.0f} KB/s", font=F22, fill=C["TEAL"])
+    d.text((16, y+74), f"Dn {m.dn:0.0f} KB/s", font=F22, fill=C["ORANGE"])
+    y += 112
 
-    # System Info
-    rounded_fill(d, (8,y, W-8, y+136), radius=14, fill=C["SURFACE2"])
+    # System Info (hizalama ve boşluklar iyileştirildi)
+    rounded_fill(d, (8,y, W-8, y+150), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "System Info", C["LIME"], (0,0,0))
     try:
         boot = psutil.boot_time() if psutil else time.time()-1
@@ -288,27 +310,44 @@ def render_system_scrollable(W, H, m, C):
     except Exception:
         la1=la5=la15=0.0
 
-    d.text((16, y+46), f"Uptime  {dds}g {hhs}s {mms}d", font=F20, fill=C["FG"])
-    d.text((16, y+70), f"IP      {ip}",                 font=F20, fill=C["FG"])
-    d.text((16, y+94), f"CPU Hz  {arm:0.0f} MHz",        font=F20, fill=C["FG"])
-    d.text((16, y+118),f"Load    {la1:.2f} {la5:.2f} {la15:.2f}", font=F20, fill=C["FG"])
-    y += 148
+    label_x = 16; value_x = 120
+    line_y = y+46; line_h = 26
+    def row(lbl, val):
+        nonlocal line_y
+        d.text((label_x, line_y), lbl, font=F20, fill=(200,205,210))
+        d.text((value_x, line_y), val, font=F20, fill=C["FG"])
+        line_y += line_h
 
-    # Top Processes
-    rounded_fill(d, (8,y, W-8, y+128), radius=14, fill=C["SURFACE2"])
+    row("Uptime", f"{dds}g {hhs}s {mms}d")
+    row("IP",     ip)
+    row("CPU Hz", f"{arm:0.0f} MHz")
+    row("Load",   f"{la1:.2f} {la5:.2f} {la15:.2f}")
+    y += 160
+
+    # Top Processes (CPU'ya göre; yoksa MEM'e göre)
+    rounded_fill(d, (8,y, W-8, y+130), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Top Processes", C["VIOLET"], (255,255,255))
-    yy = y+46
+    yy = y+48
     try:
         procs=[]
         if psutil:
             for p in psutil.process_iter(attrs=["pid","name","cpu_percent","memory_percent"]):
-                try: procs.append(p.info)
-                except Exception: pass
-            procs.sort(key=lambda x: x.get("cpu_percent",0.0), reverse=True)
-            for row in procs[:3]:
-                name=str(row.get("name",""))[:14]
-                cpu = clamp(row.get("cpu_percent",0.0),0,100)
-                mem = clamp(row.get("memory_percent",0.0),0,100)
+                try:
+                    info = p.info
+                    # CPU'yı güncelleme denemesi (bloklamadan)
+                    _ = p.cpu_percent(interval=0.0)
+                    procs.append(info)
+                except Exception:
+                    pass
+            # Eğer tüm cpu_percent 0 ise, memory'e göre sırala
+            if any((x.get("cpu_percent",0.0) or 0) > 0 for x in procs):
+                procs.sort(key=lambda x: x.get("cpu_percent",0.0), reverse=True)
+            else:
+                procs.sort(key=lambda x: x.get("memory_percent",0.0), reverse=True)
+            for rowp in procs[:3]:
+                name=str(rowp.get("name",""))[:14]
+                cpu = clamp(rowp.get("cpu_percent",0.0),0,100)
+                mem = clamp(rowp.get("memory_percent",0.0),0,100)
                 d.text((16,yy), name, font=F20, fill=C["FG"])
                 d.text((W-18,yy), f"{cpu:0.0f}% CPU  {mem:0.0f}% MEM", font=F18, fill=(200,205,210), anchor="ra")
                 yy+=30
@@ -326,7 +365,7 @@ def render_system_scrollable(W, H, m, C):
 
     return img, content_h
 
-# ---------- Diğer sayfalar ----------
+# ---------- Diğer sayfalar (kısa) ----------
 def page_disk_net(d, m, C, W, H):
     d.text((12,10), "DISK & NET", font=F28, fill=C["FG"])
     d.text((12,56), f"DISK {m.disk:0.0f}%", font=F24, fill=C["FG"])
@@ -392,7 +431,7 @@ class App:
         self.dark = True
         self.C = DARK
         self.m = Metrics()
-        for _ in range(4):
+        for _ in range(3):
             self.m.update(); time.sleep(0.1)
 
         # Touch
@@ -416,7 +455,7 @@ class App:
     def _metrics_loop(self):
         while self.running:
             self.m.update()
-            time.sleep(0.6)
+            time.sleep(0.5)
 
     def _render_system_canvas(self):
         self.system_canvas, self.system_h = render_system_scrollable(self.W, self.H, self.m, self.C)
@@ -474,13 +513,13 @@ class App:
 
         changed = False
 
-        # DİKEY SCROLL (TERS HARAKET): AŞAĞI kaydır -> içerikte YUKARI, YUKARI kaydır -> içerikte AŞAĞI
+        # DİKEY SCROLL (TERS): DOWN => içerikte YUKARI, UP => içerikte AŞAĞI
         if self.cur == 0 and g in (0x01, 0x02):
             if t - last_scroll_time_ms >= SCROLL_COOLDOWN_MS:
                 max_off = max(0, self.system_h - self.H)
-                if g == 0x01:   # DOWN: içerikte YUKARI
+                if g == 0x01:   # DOWN: yukarı git
                     self.scroll_y = max(0, self.scroll_y - self.scroll_step)
-                elif g == 0x02: # UP: içerikte AŞAĞI
+                elif g == 0x02: # UP: aşağı git
                     self.scroll_y = min(max_off, self.scroll_y + self.scroll_step)
                 self.scroll_y = max(0, min(self.scroll_y, max_off))
                 last_scroll_time_ms = t
@@ -530,8 +569,8 @@ class App:
                     self.disp.ShowImage(img)
                     last_draw = time.time()
             else:
-                # periyodik redraw
-                if time.time() - last_draw > 0.7:
+                # periyodik redraw (hızlı ama aşırı değil)
+                if time.time() - last_draw > 0.6:
                     if self.cur == 0:
                         self._render_system_canvas()
                     img = self._render_page()
@@ -545,7 +584,7 @@ if __name__ == "__main__":
         App().run()
     except KeyboardInterrupt:
         try:
-            disp = LCD_1inch69.LCD_1inch69(rst=RST, dc=DC, bl=BL, tp_int=TP_INT, tp_rst=TP_RST, bl_freq=100)
+            disp = LCD_1inch69.LCD_1inch69(rst=RST, dc=DC, bl=BL, tp_int=TP_RST, tp_rst=TP_RST, bl_freq=100)
             disp.module_exit()
         except Exception:
             pass
