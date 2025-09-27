@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # 1.69" 240x280 LCD_1inch69 + CST816S touch
-# Auto-orientation calibration (tries all SWAP/INVERT combos) + median sampling + smoothing.
-# Copy-paste ready.
+# "Tap-to-mark": Dokunduğun yerde tek ve net hedef işareti. İz bırakmaz.
+# İlk çalıştırmada 4-nokta kalibrasyon. Sol-üstte 1s basılı tut -> yeniden kalibrasyon.
 
-import os, time, json, math, subprocess, statistics
+import time, json, math, subprocess
 from pathlib import Path
-from collections import deque
 from PIL import Image, ImageDraw
 
-# ---- vendor lcd driver ----
+# --- vendor lcd driver ---
 from lib.LCD_1inch69 import LCD_1inch69
 
-# ---- touch (CST816S) ----
+# --- touch (CST816S) ---
 try:
     from smbus2 import SMBus
     SMBUS_OK = True
@@ -20,7 +19,6 @@ except Exception:
 
 I2C_BUS = 1
 CST816_ADDR = 0x15
-
 CALIB_PATH = Path.home() / ".config" / "pi169_touch.json"
 CALIB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -30,55 +28,28 @@ C = {
     "ACC":  (120, 180, 255),
     "OK":   ( 90, 200, 120),
     "BAD":  (255,  80,  80),
-    "GRID": (24, 28, 36),
+    "GRID": (30, 34, 40),
+    "X":    (255,  80,  80),   # hedef rengi
 }
 
-# ---------- helpers ----------
-def clamp(v, lo, hi):
-    try:
-        v = float(v)
-        if not math.isfinite(v): v = 0.0
-    except Exception:
-        v = 0.0
-    return max(lo, min(hi, v))
-
-def median(vals):
-    return int(statistics.median(vals)) if vals else 0
-
-def default_calib():
-    return {
-        "swap_xy": True,
-        "invert_x": True,
-        "invert_y": False,
-        "xmin": 0, "xmax": 3840,
-        "ymin": 0, "ymax": 3840
-    }
-
-def draw_cross(d, x, y, col=(0,255,0)):
-    r = 7
-    d.line((x-r, y, x+r, y), fill=col, width=2)
-    d.line((x, y-r, x, y+r), fill=col, width=2)
-
-def grid(d, W, H):
+def draw_grid(d, W, H):
     for gy in range(0, H, 28):
         d.line((0, gy, W, gy), fill=C["GRID"])
+    for gx in range(0, W, 24):
+        d.line((gx, 0, gx, H), fill=C["GRID"])
 
-# ---------- touch wrapper ----------
+def default_calib():
+    return {"swap_xy": True, "invert_x": True, "invert_y": False,
+            "xmin": 0, "xmax": 3840, "ymin": 0, "ymax": 3840}
+
 class Touch:
     def __init__(self):
         self.available = SMBUS_OK
         self.bus = None
         self.calib = default_calib()
-        self.x_smooth = None
-        self.y_smooth = None
-        self.alpha = 0.35  # smoothing factor
-
         if CALIB_PATH.exists():
-            try:
-                self.calib.update(json.loads(CALIB_PATH.read_text()))
-            except Exception:
-                pass
-
+            try: self.calib.update(json.loads(CALIB_PATH.read_text()))
+            except Exception: pass
         if self.available:
             try:
                 self.bus = SMBus(I2C_BUS)
@@ -94,7 +65,6 @@ class Touch:
         except Exception:
             return None
         if (d[1] & 0x0F) == 0:
-            self.x_smooth = self.y_smooth = None
             return None
         rx = ((d[2] & 0x0F) << 8) | d[3]
         ry = ((d[4] & 0x0F) << 8) | d[5]
@@ -114,57 +84,47 @@ class Touch:
         return x, y
 
     def read_point(self, W, H):
-        raw = self.read_raw()
-        if not raw: return None
-        x, y = self._map(raw[0], raw[1], self.calib, W, H)
-        # simple low-pass smoothing to fight jitter
-        if self.x_smooth is None:
-            self.x_smooth, self.y_smooth = x, y
-        else:
-            a = self.alpha
-            self.x_smooth = int(self.x_smooth*(1-a) + x*a)
-            self.y_smooth = int(self.y_smooth*(1-a) + y*a)
-        return self.x_smooth, self.y_smooth
+        r = self.read_raw()
+        if not r: return None
+        return self._map(r[0], r[1], self.calib, W, H)
 
-    # ---------- auto-orientation calibration ----------
-    def calibrate_interactive(self, lcd, W, H):
-        targets = [(18,18), (W-18,18), (W-18,H-18), (18,H-18)]  # TL, TR, BR, BL
-        samples = []  # list of raw (rx,ry) for each target
+    # --- basit 4-nokta kalibrasyon ---
+    def calibrate(self, lcd, W, H):
+        targets = [(18,18), (W-18,18), (W-18,H-18), (18,H-18)]  # TL,TR,BR,BL
+        samples = []
         for i,(tx,ty) in enumerate(targets, 1):
             img = Image.new("RGB", (W,H), C["BG"]); d = ImageDraw.Draw(img)
+            draw_grid(d, W, H)
             d.text((8,8), f"Calibrate {i}/4", fill=C["FG"])
-            draw_cross(d, tx, ty, (255,210,0)); lcd.ShowImage(img)
-            # collect multiple raw hits and take median to avoid jitter
-            rx_list, ry_list = [], []
+            # hedef çiz
+            r=10
+            d.ellipse((tx-r,ty-r,tx+r,ty+r), outline=C["ACC"], width=2)
+            d.line((tx-14,ty,tx+14,ty), fill=C["ACC"], width=2)
+            d.line((tx,ty-14,tx,ty+14), fill=C["ACC"], width=2)
+            lcd.ShowImage(img)
+            # tek dokunuş bekle
             t0 = time.time()
             while time.time() - t0 < 8.0:
-                r = self.read_raw()
-                if r:
-                    rx_list.append(r[0]); ry_list.append(r[1])
-                    time.sleep(0.12)  # small debounce
-                    # require a couple of samples
-                    if len(rx_list) >= 5: break
-                else:
-                    time.sleep(0.01)
-            if rx_list:
-                samples.append((median(rx_list), median(ry_list)))
-            else:
-                # if user missed a point, put a placeholder to force retry later
-                samples.append(None)
+                raw = self.read_raw()
+                if raw:
+                    samples.append(raw)
+                    time.sleep(0.3)
+                    break
+                time.sleep(0.01)
 
-        if any(s is None for s in samples):
+        if len(samples) < 4:
+            # başarısız
             img = Image.new("RGB", (W,H), C["BG"]); d = ImageDraw.Draw(img)
-            d.text((8,8), "Calibration failed, try again", fill=C["BAD"]); lcd.ShowImage(img)
-            time.sleep(1.0)
+            d.text((8,8), "Calibration failed", fill=C["BAD"])
+            lcd.ShowImage(img); time.sleep(0.8)
             return False
 
-        # raw mins/maxes from medians with small padding
-        rx_vals = [s[0] for s in samples]; ry_vals = [s[1] for s in samples]
+        rx = [s[0] for s in samples]; ry = [s[1] for s in samples]
         pad = 40
-        xmin = max(0, min(rx_vals) - pad); xmax = max(rx_vals) + pad
-        ymin = max(0, min(ry_vals) - pad); ymax = max(ry_vals) + pad
+        xmin = max(0, min(rx) - pad); xmax = max(rx) + pad
+        ymin = max(0, min(ry) - pad); ymax = max(ry) + pad
 
-        # try all orientation combos and pick the one that maps corners closest to targets
+        # dört kombinasyondan en iyi eşleşeni seç
         combos = []
         for swap in (False, True):
             for ix in (False, True):
@@ -172,30 +132,25 @@ class Touch:
                     cfg = {"swap_xy": swap, "invert_x": ix, "invert_y": iy,
                            "xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax}
                     mapped = [self._map(samples[i][0], samples[i][1], cfg, W, H) for i in range(4)]
-                    # expected order TL, TR, BR, BL matches targets list
                     err = 0.0
                     for (mx,my), (tx,ty) in zip(mapped, targets):
-                        err += ((mx - tx)**2 + (my - ty)**2) ** 0.5
+                        err += ((mx-tx)**2 + (my-ty)**2)**0.5
                     combos.append((err, cfg))
         combos.sort(key=lambda t: t[0])
         best_err, best_cfg = combos[0]
-
-        # accept only if not insane
         if best_err > (W+H)*0.9:
             img = Image.new("RGB", (W,H), C["BG"]); d = ImageDraw.Draw(img)
-            d.text((8,8), "Calibration error too high", fill=C["BAD"]); lcd.ShowImage(img)
-            time.sleep(1.0)
+            d.text((8,8), "Calibration error high", fill=C["BAD"])
+            lcd.ShowImage(img); time.sleep(0.8)
             return False
 
         self.calib = best_cfg
         CALIB_PATH.write_text(json.dumps(self.calib))
         img = Image.new("RGB", (W,H), C["BG"]); d = ImageDraw.Draw(img)
         d.text((8,8), "Calibration saved", fill=C["OK"])
-        d.text((8,28), f"swap={best_cfg['swap_xy']} ix={best_cfg['invert_x']} iy={best_cfg['invert_y']}", fill=C["FG"])
-        lcd.ShowImage(img); time.sleep(0.8)
+        lcd.ShowImage(img); time.sleep(0.5)
         return True
 
-# ---------- app ----------
 class App:
     def __init__(self):
         self.lcd = LCD_1inch69()
@@ -203,23 +158,9 @@ class App:
         try: self.lcd.bl_DutyCycle(100)
         except Exception: pass
         self.W, self.H = self.lcd.width, self.lcd.height
-
         self.touch = Touch()
-        self.cpu_hist = deque(maxlen=80)
-
-    def _cpu_pct(self):
-        try:
-            out = subprocess.check_output(["bash","-lc","top -b -n1 | awk '/Cpu\\(s\\)/{print $2}'"])
-            return clamp(out.decode().strip(), 0, 100)
-        except Exception:
-            try:
-                la1 = os.getloadavg()[0]
-                return clamp(la1*25.0, 0, 100)
-            except Exception:
-                return 0.0
 
     def ensure_calibrated(self):
-        # Force calibration if file missing or looks default-ish
         need = not CALIB_PATH.exists()
         if not need:
             try:
@@ -228,49 +169,66 @@ class App:
             except Exception:
                 need = True
         if need and self.touch.available:
-            self.touch.calibrate_interactive(self.lcd, self.W, self.H)
+            self.touch.calibrate(self.lcd, self.W, self.H)
+
+    def draw_idle(self):
+        img = Image.new("RGB", (self.W, self.H), C["BG"]); d = ImageDraw.Draw(img)
+        draw_grid(d, self.W, self.H)
+        d.text((8,8), "Tap anywhere to mark", fill=C["FG"])
+        d.text((8,26), "Hold top-left 1s -> Recalib", fill=C["FG"])
+        if not self.touch.available:
+            d.text((self.W-8,8), "TOUCH OFF", fill=C["BAD"], anchor="ra")
+        self.lcd.ShowImage(img)
+
+    def draw_mark(self, x, y):
+        img = Image.new("RGB", (self.W, self.H), C["BG"]); d = ImageDraw.Draw(img)
+        draw_grid(d, self.W, self.H)
+        # büyük hedef
+        d.ellipse((x-16,y-16,x+16,y+16), outline=C["X"], width=3)
+        d.line((x-22,y, x+22,y), fill=C["X"], width=3)
+        d.line((x,y-22, x,y+22), fill=C["X"], width=3)
+        # koordinatlar
+        d.text((8,8), f"x={x} y={y}", fill=C["FG"])
+        self.lcd.ShowImage(img)
 
     def run(self):
         self.ensure_calibrated()
-        last = 0
+        idle_since = 0
+        touching = False
+        hold_tl_t0 = None
+
         while True:
-            img = Image.new("RGB", (self.W, self.H), C["BG"]); d = ImageDraw.Draw(img)
-            grid(d, self.W, self.H)
-            d.text((8,8), "Touch test (hold TL 1s to recalib)", fill=C["FG"])
-            if not self.touch.available:
-                d.text((self.W-8,8), "TOUCH OFF", fill=C["BAD"], anchor="ra")
-
-            now = time.time()
-            if now - last > 0.5:
-                last = now
-                self.cpu_hist.append(self._cpu_pct())
-            x0,y0,w,h = 8, self.H-28, self.W-16, 18
-            d.rectangle((x0,y0,x0+w,y0+h), outline=C["GRID"], width=1)
-            if len(self.cpu_hist) > 1:
-                for i,val in enumerate(self.cpu_hist):
-                    vx = x0 + int(i*(w-2)/max(1,len(self.cpu_hist)-1))
-                    vy = y0 + h - 2 - int(clamp(val,0,100)*(h-4)/100.0)
-                    d.line((vx, y0+h-2, vx, vy), fill=C["ACC"])
-
             pt = self.touch.read_point(self.W, self.H)
             if pt:
                 x,y = pt
-                draw_cross(d, x, y, (0,255,0))
-                # top-left long press to recalibrate
+                # sol-üst 1s basılı -> yeniden kalibrasyon
                 if x < 52 and y < 40:
-                    t0 = time.time()
-                    while True:
-                        p2 = self.touch.read_point(self.W, self.H)
-                        if not p2: break
-                        if time.time() - t0 > 1.0:
-                            self.touch.calibrate_interactive(self.lcd, self.W, self.H)
-                            break
-                        time.sleep(0.02)
+                    if hold_tl_t0 is None: hold_tl_t0 = time.time()
+                    elif time.time() - hold_tl_t0 > 1.0:
+                        self.touch.calibrate(self.lcd, self.W, self.H)
+                        hold_tl_t0 = None
+                        continue
+                else:
+                    hold_tl_t0 = None
 
-            self.lcd.ShowImage(img)
+                self.draw_mark(x, y)
+                touching = True
+                idle_since = time.time()
+            else:
+                hold_tl_t0 = None
+                if touching:
+                    # parmağı kaldırdı; 150 ms sonra idle ekrana dön
+                    if time.time() - idle_since > 0.15:
+                        touching = False
+                        self.draw_idle()
+                else:
+                    # idle ekranı periyodik yenile
+                    if time.time() - idle_since > 1.0:
+                        self.draw_idle()
+                        idle_since = time.time()
+
             time.sleep(0.01)
 
-# ---------- main ----------
 if __name__ == "__main__":
     try:
         App().run()
