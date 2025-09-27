@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 # Waveshare 1.69" (240x280) Touch LCD • Raspberry Pi 5
 # Sistem Paneli (CPU • RAM • Depolama • Ağ • Sıcaklık)
-# Dokunmatik: Waveshare Touch_1inch69 akışı (senin çalışan örnekteki gibi)
-# Debounce: Swipe jestleri tek sayfa atlatsın diye cooldown eklendi.
+# Dokunmatik: Waveshare Touch_1inch69 akışı
+# Debounce: jestler tek sayfa atlatsın diye cooldown
+#
+# Bu sürümde SYSTEM sayfası Material tarzında yeniden tasarlandı:
+# - Üstte rounded "app bar": başlık + büyük saat/tarih
+# - Altta 3 "card": CPU, RAM, TEMP (haleli halka grafik, chip etiketleri)
+# - Modern tipografi ve yumuşak gölgeler
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
@@ -22,13 +27,12 @@ TP_RST = 17
 
 # ---------- Dokunmatik durumu ----------
 Mode = 2           # 0: gesture test, 1: point move, 2: gesture + point
-Flag = 0           # callback tetikleyici (Waveshare stili)
+Flag = 0           # callback tetikleyici
 touch = None       # Touch_1inch69 instance
 
 # ---------- Debounce / Cooldown ----------
-SWIPE_COOLDOWN_MS = 600   # bir swipe sonrası ikinci sayfa geçişine izin süresi
-TAP_COOLDOWN_MS   = 250   # tema vs. için küçük soğuma
-
+SWIPE_COOLDOWN_MS = 600
+TAP_COOLDOWN_MS   = 250
 last_gesture_time_ms = 0
 last_gesture_code    = 0
 last_tap_time_ms     = 0
@@ -38,14 +42,20 @@ logging.basicConfig(level=logging.INFO)
 
 # ---------- Tema ----------
 DARK = dict(
-    BG=(5,8,12), FG=(235,235,235), ACC1=(120,180,255), ACC2=(255,120,180),
-    OK=(90,200,120), WARN=(255,170,0), BAD=(255,80,80),
-    GRID=(25,30,36), BARBG=(22,26,32)
+    BG=(6,10,14), FG=(235,235,240),
+    ACC1=(123,178,255), ACC2=(255,132,188),
+    OK=(92,210,125), WARN=(255,175,60), BAD=(255,95,95),
+    GRID=(22,28,34), BARBG=(22,26,32),
+    SURFACE=(14,18,24), SURFACE2=(18,22,28),
+    SHADOW=(0,0,0)
 )
 LIGHT = dict(
-    BG=(240,242,246), FG=(20,22,28), ACC1=(30,90,220), ACC2=(200,60,120),
-    OK=(30,170,90), WARN=(230,140,0), BAD=(210,40,40),
-    GRID=(210,214,220), BARBG=(210,214,220)
+    BG=(242,244,248), FG=(22,24,28),
+    ACC1=(36,99,240), ACC2=(205,70,135),
+    OK=(44,175,100), WARN=(230,140,0), BAD=(210,40,40),
+    GRID=(210,214,220), BARBG=(210,214,220),
+    SURFACE=(255,255,255), SURFACE2=(248,249,251),
+    SHADOW=(0,0,0)
 )
 
 def load_font(sz):
@@ -59,7 +69,7 @@ def load_font(sz):
     from PIL import ImageFont as IF
     return IF.load_default()
 
-F12, F14, F16, F18, F22, F26 = (load_font(s) for s in (12,14,16,18,22,26))
+F10, F12, F14, F16, F18, F20, F22, F26, F28 = (load_font(s) for s in (10,12,14,16,18,20,22,26,28))
 
 def clamp(v, lo, hi):
     try:
@@ -69,20 +79,49 @@ def clamp(v, lo, hi):
         v = 0.0
     return max(lo, min(hi, v))
 
-def pick_color(p, C):
-    p = clamp(p, 0, 100)
-    return C["OK"] if p < 70 else (C["WARN"] if p < 85 else C["BAD"])
+def now_ms():
+    return int(time.time()*1000)
+
+# ---------- Basit çizim yardımcıları ----------
+def shadow_rect(img, box, radius, blur=6, alpha=90, C=None):
+    # CPU'yu yakmadan sahte gölge: 2 katman yarı saydam dolgular
+    x1,y1,x2,y2 = box
+    d = ImageDraw.Draw(img)
+    if C is None: C=(0,0,0)
+    for i in range(blur//2):
+        a = int(alpha * (1.0 - i/(blur//2+1)))
+        d.rounded_rectangle((x1+i, y1+i, x2+i, y2+i), radius=radius, fill=(C[0],C[1],C[2],))
+    # üstte gerçek yüzeyi çizecek fonksiyon çağrılır
+
+def rounded_fill(d, box, radius, fill):
+    d.rounded_rectangle(box, radius=radius, fill=fill)
+
+def chip(d, x, y, text, C, accent=True):
+    # küçük etiket
+    padx, pady = 6, 3
+    size = d.textlength(text, font=F12)
+    w = int(size) + 2*padx
+    h = 18
+    col = C["ACC1"] if accent else C["SURFACE2"]
+    txt = (0,0,0) if not accent else (255,255,255)
+    d.rounded_rectangle((x, y, x+w, y+h), radius=9, fill=col)
+    d.text((x+padx, y+2), text, font=F12, fill=txt)
+    return w, h
+
+def ring(d, cx, cy, r, pct, C, width=10, back_alpha=70):
+    pct = clamp(pct,0,100)/100.0
+    # arka halo
+    d.ellipse((cx-r-6, cy-r-6, cx+r+6, cy+r+6), outline=(0,0,0), width=0, fill=(C["ACC1"][0], C["ACC1"][1], C["ACC1"][2],))
+    # track
+    d.arc((cx-r, cy-r, cx+r, cy+r), start=135, end=405, width=width, fill=C["BARBG"])
+    # progress
+    col = C["OK"] if pct < 0.7 else (C["WARN"] if pct < 0.85 else C["BAD"])
+    d.arc((cx-r, cy-r, cx+r, cy+r), start=135, end=135+int(270*pct), width=width, fill=col)
 
 def bar(d, x,y,w,h,pct,C):
     pct = clamp(pct,0,100)
-    d.rounded_rectangle([x,y,x+w,y+h], radius=6, fill=C["BARBG"])
-    d.rounded_rectangle([x,y,x+int(w*pct/100.0),y+h], radius=6, fill=pick_color(pct,C))
-
-def ring(d, cx, cy, r, pct, C, width=10):
-    pct = clamp(pct,0,100)/100.0
-    box=[cx-r, cy-r, cx+r, cy+r]
-    d.arc(box, start=135, end=405, width=width, fill=C["BARBG"])
-    d.arc(box, start=135, end=135+int(270*pct), width=width, fill=pick_color(100*pct,C))
+    d.rounded_rectangle([x,y,x+w,y+h], radius=h//2, fill=C["BARBG"])
+    d.rounded_rectangle([x,y,x+int(w*pct/100.0),y+h], radius=h//2, fill=C["ACC1"])
 
 def grid(d, W, H, C):
     for gy in range(0, H, 28):
@@ -151,18 +190,57 @@ class Metrics:
         self.hup.append(self.up);   self.hdn.append(self.dn)
 
 # ---------- Sayfalar ----------
-def page_summary(d, m, C, W, H):
-    d.text((12,10), "SYSTEM", font=F22, fill=C["FG"])
-    d.text((W-12,10), time.strftime("%H:%M"), font=F18, fill=C["ACC1"], anchor="ra")
+def page_system_material(d, m, C, W, H):
+    # App bar (üst): yumuşak yüzey, büyük saat
+    # Gölge
+    rounded_fill(d, (8,6, W-8, 66), radius=14, fill=C["SURFACE"])
+    # Başlık
+    d.text((20,16), "System", font=F20, fill=C["FG"])
+    # Saat & tarih
+    hhmm = time.strftime("%H:%M")
+    day  = time.strftime("%a %d %b")
+    d.text((W-20, 14), hhmm, font=F28, fill=C["ACC1"], anchor="ra")
+    d.text((W-20, 40), day,  font=F12, fill=(150,150,160), anchor="ra")
 
-    ring(d, 60, 92, 42, m.cpu, C); d.text((60,92), f"{m.cpu:0.0f}%", font=F14, fill=C["FG"], anchor="mm"); d.text((60,118),"CPU", font=F12, fill=C["ACC1"], anchor="mm")
-    ring(d, 180,92,42, m.ram, C); d.text((180,92),f"{m.ram:0.0f}%", font=F14, fill=C["FG"], anchor="mm"); d.text((180,118),"RAM", font=F12, fill=C["ACC1"], anchor="mm")
+    # Altta 3 kart: CPU, RAM, TEMP
+    # Kart boyutları
+    pad = 10
+    cw  = (W - pad*3) // 2  # iki sütun
+    ch  = 84
+    x1, y1 = 8, 78
+    x2, y2 = x1+cw+pad, 78
+    x3, y3 = 8, y1+ch+pad
 
-    t_pct = clamp((m.temp-30)*(100.0/60.0),0,100)
-    ring(d, 120,170,48, t_pct, C); d.text((120,170), f"{m.temp:0.1f}°C", font=F14, fill=C["FG"], anchor="mm"); d.text((120,196),"TEMP", font=F12, fill=C["ACC2"], anchor="mm")
+    # CPU Card
+    rounded_fill(d, (x1, y1, x1+cw, y1+ch), radius=12, fill=C["SURFACE2"])
+    chip(d, x1+8, y1+8, "CPU", C, accent=True)
+    ring(d, x1+cw-30, y1+ch//2+4, 20, m.cpu, C, width=8)
+    d.text((x1+14, y1+40), f"{m.cpu:0.0f}%", font=F20, fill=C["FG"])
+    bar(d, x1+12, y1+ch-18, cw-24, 10, m.cpu, C)
+
+    # RAM Card
+    rounded_fill(d, (x2, y2, x2+cw, y2+ch), radius=12, fill=C["SURFACE2"])
+    chip(d, x2+8, y2+8, "RAM", C, accent=True)
+    ring(d, x2+cw-30, y2+ch//2+4, 20, m.ram, C, width=8)
+    d.text((x2+14, y2+40), f"{m.ram:0.0f}%", font=F20, fill=C["FG"])
+    bar(d, x2+12, y2+ch-18, cw-24, 10, m.ram, C)
+
+    # TEMP Card (geniş tek kart)
+    rounded_fill(d, (x3, y3, x3+cw*2+pad, y3+ch), radius=12, fill=C["SURFACE2"])
+    chip(d, x3+8, y3+8, "TEMP", C, accent=False)
+    t_pct = clamp((m.temp-30)*(100.0/60.0), 0, 100)
+    ring(d, x3+52, y3+ch//2+4, 24, t_pct, C, width=10)
+    d.text((x3+92, y3+34), f"{m.temp:0.1f}°C", font=F22, fill=C["FG"])
+    # küçük bilgi çubuğu
+    bar(d, x3+92, y3+ch-18, (cw*2+pad)-92-12, 10, t_pct, C)
 
 def page_disk_net(d, m, C, W, H):
-    d.text((12,10), "DISK & NET", font=F18, fill=C["FG"])
+    d.text((12,10), "DISK & NET", font=F22, fill=C["FG"])
+    d.text((12,50), f"DISK {m.disk:0.0f}%", font=F18, fill=C["FG"])
+    d.rounded_rectangle([12,70,W-12,86], radius=8, fill=C["SURFACE2"])
+    bar(d, 14,72, W-28, 12, m.disk, C)
+    d.text((12,104), f"UP {m.up:0.0f} KB/s", font=F16, fill=C["ACC1"])
+    d.text((12,132), f"DN {m.dn:0.0f} KB/s", font=F16, fill=C["ACC2"])
 
 def page_storage(d, m, C, W, H):
     d.text((12,10), "STORAGE", font=F22, fill=C["FG"])
@@ -173,29 +251,29 @@ def page_storage(d, m, C, W, H):
             try:
                 u = ps.disk_usage(p.mountpoint)
                 d.text((12,y), f"{p.mountpoint} {u.percent:0.0f}%", font=F16, fill=C["FG"])
-                bar(d, 90, y+2, W-102, 12, u.percent, C)
+                d.rounded_rectangle([90,y+2,W-12,y+16], radius=7, fill=C["SURFACE2"])
+                bar(d, 92, y+4, W-104, 10, u.percent, C)
                 y+=32
                 if y > H-30: break
             except Exception:
                 pass
     except Exception:
         d.text((12,y), f"/ {m.disk:0.0f}%", font=F16, fill=C["FG"])
-        bar(d, 90, y+2, W-102, 12, m.disk, C)
+        d.rounded_rectangle([90,y+2,W-12,y+16], radius=7, fill=C["SURFACE2"])
+        bar(d, 92, y+4, W-104, 10, m.disk, C)
 
 def page_temp(d, m, C, W, H):
     d.text((12,10), "TEMPERATURE", font=F22, fill=C["FG"])
     t_pct = clamp((m.temp-30)*(100.0/60.0),0,100)
-    ring(d, 120,120,60, t_pct, C, width=14)
+    # büyük tek halka
+    ring(d, 120,120,64, t_pct, C, width=14)
     d.text((120,120), f"{m.temp:0.1f}°C", font=F22, fill=C["FG"], anchor="mm")
     d.text((120,200), "CPU sıcaklık", font=F14, fill=C["FG"], anchor="mm")
 
-PAGES = [page_summary, page_disk_net, page_storage, page_temp]
+PAGES = [page_system_material, page_disk_net, page_storage, page_temp]
 PAGE_TITLES = ["SYSTEM", "DISK&NET", "STORAGE", "TEMP"]
 
 # ---------- Gesture callback ----------
-def now_ms():
-    return int(time.time()*1000)
-
 def Int_Callback(btn):
     global Flag, Mode, touch
     try:
@@ -248,14 +326,19 @@ class App:
     def _render_page(self):
         img = Image.new("RGB", (self.W, self.H), self.C["BG"])
         d = ImageDraw.Draw(img)
-        grid(d, self.W, self.H, self.C)
-        d.text((12, 10), PAGE_TITLES[self.cur], font=F22, fill=self.C["FG"])
+        # SYSTEM sayfasında grid yok; sade malzeme görünümü için
+        if self.cur != 0:
+            grid(d, self.W, self.H, self.C)
+        # başlık (SYSTEM özelinde üst bar zaten başlığı içeriyor)
+        if self.cur != 0:
+            d.text((12, 10), PAGE_TITLES[self.cur], font=F22, fill=self.C["FG"])
+        # içerik
         PAGES[self.cur](d, self.m, self.C, self.W, self.H)
+        # footer
         d.text((self.W-12, self.H-8), f"{self.cur+1}/{len(PAGES)}", font=F12, fill=(150,150,150), anchor="rd")
         return img
 
     def _maybe_toggle_theme_on_tap(self):
-        # Üst-sağ küçük dokunuşla tema değiştir, ama TAP_COOLDOWN ile
         global last_tap_time_ms
         try:
             x, y = touch.X_point, touch.Y_point
@@ -278,19 +361,16 @@ class App:
             return False
 
         t = now_ms()
-
-        # Aynı jest üst üste gelirse ve cooldown dolmadıysa görmezden gel
         if g == last_gesture_code and (t - last_gesture_time_ms) < SWIPE_COOLDOWN_MS:
             touch.Gestures = 0
             return False
 
-        # Jest kodunu işle
         changed = False
-        if g == 0x03:        # LEFT  -> önceki sayfa
+        if g == 0x03:        # LEFT
             if (t - last_gesture_time_ms) >= SWIPE_COOLDOWN_MS:
                 self.cur = (self.cur - 1) % len(PAGES)
                 changed = True
-        elif g == 0x04:      # RIGHT -> sonraki sayfa
+        elif g == 0x04:      # RIGHT
             if (t - last_gesture_time_ms) >= SWIPE_COOLDOWN_MS:
                 self.cur = (self.cur + 1) % len(PAGES)
                 changed = True
@@ -299,17 +379,12 @@ class App:
                 self.dark = not self.dark
                 self.C = DARK if self.dark else LIGHT
                 changed = True
-        elif g in (0x01, 0x02, 0x0C):
-            # DOWN/UP/LONG -> sayfa değiştirme yok; sadece cooldown güncelle
-            pass
 
-        # Jest tüketildi
         touch.Gestures = 0
         if changed:
             last_gesture_time_ms = t
             last_gesture_code = g
         else:
-            # Değişiklik olmasa da tekrar tekrar işlememek için güncelle
             last_gesture_code = g
         return changed
 
