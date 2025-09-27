@@ -4,9 +4,8 @@
 # Smartwatch tarzı Sistem Paneli (renkli, büyük puntolar)
 # - Dokunmatik: Waveshare Touch_1inch69 akışı
 # - Sol/sağ: sayfalar arası geçiş
-# - Yukarı/aşağı: SYSTEM sayfasında dikey scroll (DÜZELTİLDİ: yönler artık doğal)
-# - Fazla renk: mavi/pembe YOK. Teal, Turuncu, Mor, Limon, Kehribar var.
-# - Yazılar: başlık hariç her şey büyütüldü, kontrast yükseltildi.
+# - Yukarı/aşağı: SYSTEM sayfasında dikey scroll (TERCİHİN DOĞRULTUSUNDA TERS ÇEVRİLDİ)
+# - Fazla renk: mavi/pembe yok. Teal, Turuncu, Mor, Limon, Kehribar var.
 
 import os, sys, time, math, threading, subprocess, logging
 from collections import deque
@@ -72,7 +71,7 @@ def load_font(sz):
     from PIL import ImageFont as IF
     return IF.load_default()
 
-# Büyük puntolar (başlık dışı metinler büyütüldü)
+# Büyük puntolar
 F12,F14,F16,F18,F20,F22,F24,F26,F28,F32,F36 = (load_font(s) for s in (12,14,16,18,20,22,24,26,28,32,36))
 
 def clamp(v, lo, hi):
@@ -97,12 +96,6 @@ def chip(d, x, y, text, bg, fg):
     d.rounded_rectangle((x,y,x+w,y+h), radius=10, fill=bg)
     d.text((x+padx, y+2), text, font=F16, fill=fg)
     return w, h
-
-def ring_color_for(pct, C):
-    pct = clamp(pct, 0, 100)
-    if pct < 70:   return C["LIME"]
-    if pct < 85:   return C["AMBER"]
-    return C["BAD"]
 
 def ring(d, cx, cy, r, pct, track, color, width=14):
     pct = clamp(pct,0,100)/100.0
@@ -200,27 +193,21 @@ class Metrics:
 
 # ---------- SYSTEM (scrollable, geniş tipografi, çok renk) ----------
 def render_system_scrollable(W, H, m, C):
-    """
-    Uzun dashboard imajı üretir; döner: (img, content_height)
-    """
     y = 0
-    # İçerik yüksekliğini "y" üzerinden dinamik toplayacağız
     content_h_min = H + 1
-
     img = Image.new("RGB", (W, max(content_h_min, 900)), C["BG"])
     d = ImageDraw.Draw(img)
 
     # App bar
     rounded_fill(d, (8,6, W-8, 78), radius=14, fill=C["SURFACE"])
     d.text((18, 16), "System", font=F36, fill=C["FG"])
-    # Saat + Tarih (tarih saatin altında SOL'dan başlar)
     hhmm = time.strftime("%H:%M")
     day  = time.strftime("%a %d %b")
     d.text((W-12, 14), hhmm, font=F32, fill=C["TEAL"], anchor="ra")
-    d.text((W-100, 48), day,  font=F16, fill=(200,205,210))  # soldan başlasın
+    d.text((W-100, 48), day,  font=F16, fill=(200,205,210))
     y = 90
 
-    # Temperature (turuncu)
+    # Temperature
     rounded_fill(d, (8,y, W-8, y+110), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Temperature", C["ORANGE"], (0,0,0))
     t_pct = clamp((m.temp-30)*(100.0/60.0), 0, 100)
@@ -229,7 +216,7 @@ def render_system_scrollable(W, H, m, C):
     bar(d, 96, y+70, W-96-16, 12, t_pct, color=C["ORANGE"], track=C["BARBG"])
     y += 122
 
-    # CPU (mor)
+    # CPU
     rounded_fill(d, (8,y, W-8, y+128), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "CPU", C["VIOLET"], (255,255,255))
     ring(d, 58, y+70, 28, m.cpu, track=C["BARBG"], color=C["VIOLET"], width=14)
@@ -237,14 +224,14 @@ def render_system_scrollable(W, H, m, C):
     sparkline(d, 96, y+68, W-96-16, 48, m.hcpu, C["VIOLET"], C["GRID"])
     y += 140
 
-    # RAM (teal)
+    # RAM
     rounded_fill(d, (8,y, W-8, y+94), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "RAM", C["TEAL"], (0,0,0))
     d.text((16, y+44), f"{m.ram:0.0f}%", font=F28, fill=C["FG"])
     bar(d, 110, y+48, W-110-16, 14, m.ram, color=C["TEAL"], track=C["BARBG"])
     y += 106
 
-    # Storage (kehribar + limon)
+    # Storage
     rounded_fill(d, (8,y, W-8, y+128), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Storage", C["AMBER"], (0,0,0))
     yy = y+44
@@ -268,14 +255,14 @@ def render_system_scrollable(W, H, m, C):
         d.text((W-18, yy-2), f"{u:0.0f}%", font=F16, fill=(200,205,210), anchor="ra")
     y += 140
 
-    # Network (teal + turuncu)
+    # Network
     rounded_fill(d, (8,y, W-8, y+98), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Network", C["TEAL"], (0,0,0))
     d.text((16, y+46), f"Up {m.up:0.0f} KB/s", font=F22, fill=C["TEAL"])
     d.text((16, y+70), f"Dn {m.dn:0.0f} KB/s", font=F22, fill=C["ORANGE"])
     y += 110
 
-    # System Info (büyük yazılar)
+    # System Info
     rounded_fill(d, (8,y, W-8, y+136), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "System Info", C["LIME"], (0,0,0))
     try:
@@ -307,7 +294,7 @@ def render_system_scrollable(W, H, m, C):
     d.text((16, y+118),f"Load    {la1:.2f} {la5:.2f} {la15:.2f}", font=F20, fill=C["FG"])
     y += 148
 
-    # Top Processes (3 adet, büyük)
+    # Top Processes
     rounded_fill(d, (8,y, W-8, y+128), radius=14, fill=C["SURFACE2"])
     chip(d, 16, y+10, "Top Processes", C["VIOLET"], (255,255,255))
     yy = y+46
@@ -331,17 +318,15 @@ def render_system_scrollable(W, H, m, C):
         pass
     y += 140
 
-    # İçerik yüksekliğini finalize et
     content_h = max(y+10, content_h_min)
     if content_h > img.height:
-        # gerektiğinden kısa ise yeni bir image üret ve taşınan kısmı kopyala
         new_img = Image.new("RGB", (W, content_h), C["BG"])
         new_img.paste(img, (0,0))
         img = new_img
 
     return img, content_h
 
-# ---------- Diğer sayfalar (kısa) ----------
+# ---------- Diğer sayfalar ----------
 def page_disk_net(d, m, C, W, H):
     d.text((12,10), "DISK & NET", font=F28, fill=C["FG"])
     d.text((12,56), f"DISK {m.disk:0.0f}%", font=F24, fill=C["FG"])
@@ -422,7 +407,7 @@ class App:
         self.system_canvas = None
         self.system_h = self.H
         self.scroll_y = 0
-        self.scroll_step = 56  # daha iri adım
+        self.scroll_step = 56  # iri adım
 
         # Thread
         self.running = True
@@ -435,7 +420,6 @@ class App:
 
     def _render_system_canvas(self):
         self.system_canvas, self.system_h = render_system_scrollable(self.W, self.H, self.m, self.C)
-        # clamp
         max_off = max(0, self.system_h - self.H)
         self.scroll_y = max(0, min(self.scroll_y, max_off))
 
@@ -450,7 +434,6 @@ class App:
         else:
             img = Image.new("RGB", (self.W, self.H), self.C["BG"])
             d = ImageDraw.Draw(img)
-            # Başlıklar büyük
             if self.cur == 1:
                 page_disk_net(d, self.m, self.C, self.W, self.H)
             elif self.cur == 2:
@@ -491,14 +474,14 @@ class App:
 
         changed = False
 
-        # DİKEY SCROLL (DÜZ YÖN): aşağı kaydır -> içerikte aşağı; yukarı kaydır -> içerikte yukarı
+        # DİKEY SCROLL (TERS HARAKET): AŞAĞI kaydır -> içerikte YUKARI, YUKARI kaydır -> içerikte AŞAĞI
         if self.cur == 0 and g in (0x01, 0x02):
             if t - last_scroll_time_ms >= SCROLL_COOLDOWN_MS:
                 max_off = max(0, self.system_h - self.H)
-                if g == 0x01:   # DOWN: içerikte aşağı
-                    self.scroll_y = min(max_off, self.scroll_y + self.scroll_step)
-                elif g == 0x02: # UP: içerikte yukarı
+                if g == 0x01:   # DOWN: içerikte YUKARI
                     self.scroll_y = max(0, self.scroll_y - self.scroll_step)
+                elif g == 0x02: # UP: içerikte AŞAĞI
+                    self.scroll_y = min(max_off, self.scroll_y + self.scroll_step)
                 self.scroll_y = max(0, min(self.scroll_y, max_off))
                 last_scroll_time_ms = t
                 changed = True
