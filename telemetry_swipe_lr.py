@@ -297,15 +297,28 @@ class App:
         self.anim=0.0
 
     def _handle_touch(self):
-        code, pt = self.touch.read_gesture(self.W,self.H)
-        if not pt: return
-        x,y = pt
-        if x>self.W-40 and y<40:
-            self._toggle_theme(); time.sleep(0.2); return
-        if code==-1: self._switch("L")
-        elif code==1: self._switch("R")
-        elif code==-2: self._switch("U")
-        elif code==2: self._switch("D")
+        g = self.touch.read_gesture(self.W,self.H)
+        if not g: 
+            return
+
+        # Sağ üst köşe: tema değiştir
+        pt = self.touch._point(self.W, self.H)
+        if pt:
+            x,y = pt
+            if x > self.W-40 and y < 40:
+                self._toggle_theme()
+                time.sleep(0.2)
+                return
+
+        # Yönler
+        if g == "L":
+            self._switch("L")
+        elif g == "R":
+            self._switch("R")
+        elif g == "U":
+            self._switch("U")
+        elif g == "D":
+            self._switch("D")
 
     def loop(self):
         fps=30; dt=1.0/fps; last=time.time()
