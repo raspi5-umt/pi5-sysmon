@@ -14,7 +14,7 @@ RST_PIN = 27
 BL_PIN  = 13
 PORT = 0
 CS = 0
-ROTATION = 90      # 0/90/180/270 dene
+ROTATION = 0      # 0/90/180/270 dene
 OFFSET_LEFT = 0
 OFFSET_TOP  = 0
 
