@@ -18,7 +18,13 @@ while [[ $# -gt 0 ]]; do
     --app)    APP_NAME="$2"; shift 2;;
     --domain) DOMAIN="$2"; shift 2;;
     *) echo "Unknown arg: $1" >&2; exit 2;;
-  endesac
+    while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --app)    APP_NAME="$2"; shift 2;;
+      --domain) DOMAIN="$2"; shift 2;;
+      *) echo "Unknown arg: $1" >&2; exit 2;;
+    esac
+  done
 done
 
 if [[ -z "${APP_NAME}" || -z "${DOMAIN}" ]]; then
